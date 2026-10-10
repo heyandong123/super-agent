@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#
+# 提交前密钥守卫。启用方式（每个克隆都要执行一次）：
+#   git config core.hooksPath .githooks
+#
+# 紧急情况可用 git commit --no-verify 跳过，但请先确认你知道自己在跳过什么。
+
+root=$(git rev-parse --show-toplevel) || exit 1
+exec bash "$root/scripts/check-secrets.sh"

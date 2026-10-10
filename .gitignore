@@ -1,7 +1,20 @@
 ### CUSTOM ###
+# 本地真实密钥只放这里，绝不入库（提交前跑 scripts/check-secrets.sh 复核）
 application-local.yml
 tmp
-application.yml
+.DS_Store
+.codex/
+codex/
+# 依赖与构建产物（he-ai-agent-frontend 曾经整目录误入库）
+node_modules/
+dist/
+# 运行期产物与日志
+*.log
+*.pdf
+# 个人工具与笔记，不入公开仓库
+.claude/
+fishbone-diagram.md
+interview-qa-agent-intern.md
 
 HELP.md
 target/

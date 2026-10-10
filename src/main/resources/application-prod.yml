@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: ${DB_URL:}
+    username: ${DB_USERNAME:}
+    password: ${DB_PASSWORD:}
+  ai:
+    openai:
+      api-key: ${DEEPSEEK_API_KEY:}
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:}
+
+search-api:
+  api-key: ${SEARCH_API_KEY:}
+
+yuai:
+  rag:
+    bootstrap-enabled: true
+    store-type: pgvector

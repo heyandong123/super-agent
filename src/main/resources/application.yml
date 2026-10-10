@@ -1,0 +1,90 @@
+spring:
+  application:
+    name: yu-ai-agent
+  profiles:
+    active: local
+  ai:
+    openai:
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-v4-flash
+    dashscope:
+      chat:
+        options:
+          model: qwen-plus
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        model: gemma3:1b
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        dimensions: 1536
+        distance-type: COSINE_DISTANCE
+        max-document-batch-size: 10000 # Optional: Maximum number of documents per batch
+    mcp:
+      client:
+        stdio:
+          servers-configuration: classpath:mcp-servers.json
+server:
+  port: 8123
+  servlet:
+    context-path: /api
+# springdoc-openapi config
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      packages-to-scan: com.yupi.yuaiagent.controller
+# knife4j config
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+yuai:
+  tool-router:
+    enabled: true
+    top-k: 2
+    similarity-threshold: 0.45  # 0.2 时 topK 每轮饱和、路由退化为"删掉几个无关工具"，抬到 0.45 才真正有筛选力
+    dimensions: 1536
+    vector-table-name: tool_vector_store
+    schema-version: 2  # 工具集变更时递增此值，启动时自动重建向量索引（v1 时旧代码累积了 32 条重复索引，升到 v2 触发清空重建）
+  tool-routing:
+    fixed-tools: []  # 可选：额外每轮固定暴露的工具名
+    search-top-k: 3
+    relaxed-threshold-factor: 0.5
+    list-page-size: 10
+  memory-vector:
+    enabled: true
+    top-k: 3            # 对话记忆检索 Top-K
+    similarity-threshold: 0.1  # 记忆检索必须放宽：回忆的关键信息措辞差异大，宁可多召回让模型自己挑
+    dimensions: 1536
+    vector-table-name: chat_memory_store  # 独立表，与知识库 vector_store、工具路由 tool_vector_store 隔离
+  rag:
+    keyword-count: 5
+    retrieval:
+      similarity-threshold: 0.1
+      top-k: 3
+    splitter:
+      chunk-size: 200
+      min-chunk-size-chars: 100
+      min-chunk-length-to-embed: 10
+      max-num-chunks: 5000
+      keep-separator: true
+    pgvector:
+      dimensions: 1536
+      initialize-schema: true
+      schema-name: public
+      vector-table-name: vector_store
+      max-document-batch-size: 10000
+# 修改日志级别，查看 Spring AI 更多调用细节
+logging:
+  level:
+    org.springframework.ai: DEBUG
