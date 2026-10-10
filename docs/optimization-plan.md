@@ -77,7 +77,7 @@
 | 5 | 路由关键词英文词边界匹配 | 中 | 低 | 低 | ✅ |
 | 6 | BaseAgent 生命周期（finally 顺序 / 状态机 / 可取消 / 心跳 / onError） | 中高 | 中 | 中 | ✅ |
 | 7 | 文档修正（CLAUDE.md / README） | 中 | 极低 | 低 | ✅ |
-| 8 | 仓库瘦身 + 分批入库 + 干净历史推送 | 高 | 低 | 中 | ⬜ 提交轮 |
+| 8 | 仓库瘦身 + 分批入库 + 干净历史推送 | 高 | 低 | 中 | ✅ 已执行（2026-10-10，已推送） |
 | 9 | 质量门禁（`.editorconfig` + `@Tag("unit")` + CI） | 中 | 低 | 中 | 🟡 CI 留到提交轮 |
 | 10 | 多智能体重构（`run()` 结构化返回、去双重合成） | 中 | 中高 | 中 | ⬜ 需单独一轮设计 |
 
@@ -170,7 +170,7 @@
 
 > ⚠️ 旧分支（`master` / `develop`）保留在本地仅作对照，**永不推送**——它们包含 `3fdb175` 的历史明文。推送时只推 `main`。
 
-### 5.3 推送前检查清单
+### 5.3 推送前检查清单（✅ 已全部通过）
 
 ```bash
 git log main --pickaxe-regex -S 'sk-[A-Za-z0-9_-]{20,}'   # 期望：无命中（只查新历史；旧分支仅本地对照）
@@ -178,6 +178,8 @@ bash scripts/check-secrets.sh     # 期望：退出码 0
 git check-ignore application-local.yml   # 期望：有输出（被忽略）
 git status --short | grep -c 'application-local.yml'   # 期望：0
 ```
+
+> ✅ **执行结果（2026-10-10）**：四项预检全部通过后执行 `git push -u origin main`，推送成功——`origin`（`heyandong123/super-agent`，公开仓库）上**只有 `main` 一条历史**（SHA `71e13cf`）；`master` / `develop` 未推送；`upstream` 已设为仅 fetch（push URL → `DISABLED`），杜绝误推上游。
 
 ---
 
