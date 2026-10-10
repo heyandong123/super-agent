@@ -53,7 +53,11 @@ import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 /**
  * 恋爱大师文档加载器（负责从本地读取 Markdown 文件并解析为标准文档对象）
  */
@@ -80,30 +84,59 @@ public class LoveAppDocumentLoader {
                 // 提示: 调用 resource.getFilename() 获取完整文件名。接着用 substring(length - 6, length - 4) 提取状态。
                 String filename = resource.getFilename(); // 替换此处代码
                 String status = filename.substring(filename.length()-6,filename.length()-4); // 替换此处代码
-                // TODO 4: 构建 Markdown 解析配置 (MarkdownDocumentReaderConfig)
-                // 核心原理: 这是 Spring AI 非常强大的一点，它内置了 Markdown 解析器。
-                // 提示: 开启 Builder 模式，配置如下：
-                // 1. .withHorizontalRuleCreateDocument(true) -> 遇到 Markdown 里的分隔线 (---) 就自动切分成新文档（这就是一种天然的“文本切分”）。
-                // 2. .withIncludeCodeBlock(false) -> 忽略代码块。
-                // 3. .withIncludeBlockquote(false) -> 忽略引用块。
-                // 4. 使用 .withAdditionalMetadata() 将刚才提取的 filename 和 status 塞入元数据。
-                // 5. .build() 结束。
-                MarkdownDocumentReaderConfig config = MarkdownDocumentReaderConfig.builder()
-                        .withHorizontalRuleCreateDocument(true)
-                        .withIncludeBlockquote(false)
-                        .withIncludeCodeBlock(false)
-                        .withAdditionalMetadata("filename",filename)
-                        .withAdditionalMetadata("status",status)
-                        .build(); // 替换此处代码
-                // TODO 5: 实例化读取器并执行解析
-                // 提示: new 一个 MarkdownDocumentReader 对象，将当前的 resource 和刚才建好的 config 传进去。
-                // 然后调用它的 get() 方法，它会返回解析好的一组 Document 对象，最后使用 allDocuments.addAll() 将它们收集起来。
-                List<Document> document = new MarkdownDocumentReader(resource, config).get();
-                allDocuments.addAll(document);
+                // 【纯文本加载】直接读取文件原文（utf-8），自行按 "#### 问题标题" 切分。
+                // 不复用 MarkdownDocumentReader：它会把链接 URL 剥离、标题放 metadata、吞文档总标题，
+                // 导致知识库内容不完整。纯文本 + 自切分保证原文逐字保留（链接当纯文本）。
+                String rawText = resource.getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+                String docTitle = filename.replace(".md", "").replace(" - ", " - ");
+                List<Document> questionDocs = splitByQuestionHeaders(rawText, docTitle);
+                for (Document doc : questionDocs) {
+                    Map<String, Object> metadata = new HashMap<>(doc.getMetadata());
+                    metadata.put("filename", filename);
+                    metadata.put("status", status);
+                    metadata.put("docTitle", docTitle);
+                    allDocuments.add(new Document(doc.getText(), metadata));
+                }
             }
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
         return allDocuments;
+    }
+
+    /**
+     * 按 "#### 问题标题" 把整篇 markdown 切成问答对 Document。
+     * 规则：文档开头（总标题 + 首个问题前的导语）并入首块；每块 = "问题标题 + 答案正文"，
+     * 逐字保留原文（含链接、标点），保证知识库内容与源文档完全一致。
+     */
+    private List<Document> splitByQuestionHeaders(String rawText, String docTitle) {
+        List<Document> result = new ArrayList<>();
+        Pattern questionPattern = Pattern.compile("(?m)^\\s*####\\s+(.+)$");
+        Matcher matcher = questionPattern.matcher(rawText);
+        List<int[]> ranges = new ArrayList<>();
+        List<String> titles = new ArrayList<>();
+        while (matcher.find()) {
+            ranges.add(new int[]{matcher.start(), matcher.end()});
+            titles.add(matcher.group(1).trim());
+        }
+        if (ranges.isEmpty()) {
+            // 无 "####" 问题：整篇作为一块
+            result.add(new Document(rawText.trim(), Map.of("question", docTitle)));
+            return result;
+        }
+        for (int i = 0; i < ranges.size(); i++) {
+            int start = ranges.get(i)[0];
+            int end = (i + 1 < ranges.size()) ? ranges.get(i + 1)[0] : rawText.length();
+            String chunk = rawText.substring(start, end).trim();
+            // 首块并入文档总标题与开头导语
+            if (i == 0 && ranges.get(0)[0] > 0) {
+                String preamble = rawText.substring(0, ranges.get(0)[0]).trim();
+                if (!preamble.isEmpty()) {
+                    chunk = preamble + "\n\n" + chunk;
+                }
+            }
+            result.add(new Document(chunk, Map.of("question", titles.get(i))));
+        }
+        return result;
     }
 }

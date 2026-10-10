@@ -21,7 +21,7 @@ import org.springframework.context.annotation.Configuration;
 @Slf4j
 public class LoveAppRagCloudAdvisorConfig {
 
-    @Value("${spring.ai.dashscope.api-key}")
+    @Value("${spring.ai.dashscope.api-key:}")
     private String dashScopeApiKey;
 
     @Bean
@@ -72,7 +72,7 @@ public class LoveAppRagCloudAdvisorConfig {
      * 找到 spring.ai.dashscope.api-key 这个配置项，把它对应的字符串值赋值给下面的变量。”
      * 这样可以避免把敏感的 API Key 硬编码写死在代码里。
      */
-    @Value("${spring.ai.dashscope.api-key}")
+    @Value("${spring.ai.dashscope.api-key:}")
     private String dashScopeApiKey;
 
     /**

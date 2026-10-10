@@ -18,8 +18,11 @@ public class QueryRewriter {
 
     private final QueryTransformer queryTransformer;
 
+    private final ChatClient.Builder chatClientBuilder;
+
     public QueryRewriter(ChatModel dashscopeChatModel) {
         ChatClient.Builder builder = ChatClient.builder(dashscopeChatModel);
+        this.chatClientBuilder = builder;
         // 创建查询重写转换器
         queryTransformer = RewriteQueryTransformer.builder()
                 .chatClientBuilder(builder)
@@ -47,12 +50,16 @@ public class QueryRewriter {
 // package 定义了当前类所在的包路径
 package com.yupi.yuaiagent.rag;
 
+import cn.hutool.core.util.StrUtil;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.rag.Query;
+import org.springframework.ai.rag.preretrieval.query.expansion.MultiQueryExpander;
 import org.springframework.ai.rag.preretrieval.query.transformation.QueryTransformer;
 import org.springframework.ai.rag.preretrieval.query.transformation.RewriteQueryTransformer;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 /**
  * 查询重写器
@@ -69,6 +76,9 @@ public class QueryRewriter {
      * 使用 final 修饰，表示这个变量一旦被赋值就不能再改变，这是一种很好的防御性编程习惯，保证了类的不可变性和线程安全。
      */
     private final QueryTransformer queryTransformer;
+
+    private final ChatClient.Builder chatClientBuilder;
+
     /**
      * 【重点提示】：构造器注入 (Constructor Injection)
      * 你会发现这里没有用 @Resource！
@@ -85,6 +95,7 @@ public class QueryRewriter {
         // 提示：调用 ChatClient.builder() 方法，把传进来的 dashscopeChatModel 塞进去，用变量接收。
         // =========================================================================
         ChatClient.Builder builder = ChatClient.builder(dashscopeChatModel);
+        this.chatClientBuilder = builder;
         // =========================================================================
         // TODO 2: 创建查询重写转换器 (RewriteQueryTransformer)
         // 核心原理：RewriteQueryTransformer 是 Spring AI 内置的实现类。它内部其实封装着一段
@@ -125,6 +136,53 @@ public class QueryRewriter {
         // 提示：调用 transformedQuery 的 text() 方法（或者 getText()，视具体版本 API 而定），
         // 提取出纯文本并 return 返回。
         // =========================================================================
-        return transformedQuery.text(); // 请替换为你提取出的字符串变量
+        return transformedQuery.text();
+
+    }
+
+    /**
+     * 执行查询重写（带对话历史上下文，推荐使用）
+     *
+     * @param prompt              用户的原始提问
+     * @param conversationHistory 最近几轮对话历史
+     * @return 重写后的完整查询语句
+     */
+    public String doQueryRewrite(String prompt, String conversationHistory) {
+        if (StrUtil.isBlank(conversationHistory)) {
+            return doQueryRewrite(prompt);
+        }
+        String enrichedPrompt = """
+                以下是与用户的对话历史：
+                %s
+
+                请将用户当前的问题重写为完整、独立的查询语句。
+                要求：补充省略的上下文、展开指代词（如"它""那个""怎么做"），
+                使重写后的语句可以脱离对话历史独立理解。
+                当前问题：%s
+                """.formatted(conversationHistory, prompt);
+        Query query = new Query(enrichedPrompt);
+        Query transformedQuery = queryTransformer.transform(query);
+        return transformedQuery.text();
+    }
+
+    /**
+     * 查询重写 + 多查询扩展（推荐用于提高召回率）
+     * 先补全语义 → 再从多个角度拆解为 N 个查询
+     *
+     * @param prompt              用户原始提问
+     * @param conversationHistory 最近几轮对话历史
+     * @param numberOfQueries     扩展后的查询数量（建议 3~5）
+     * @return 重写并扩展后的多个查询
+     */
+    public List<Query> doQueryRewriteAndExpand(String prompt, String conversationHistory, int numberOfQueries) {
+        // 第一步：查询重写，补全语义
+        String rewrittenQuery = doQueryRewrite(prompt, conversationHistory);
+
+        // 第二步：基于完整语义做多角度扩展
+        MultiQueryExpander queryExpander = MultiQueryExpander.builder()
+                .chatClientBuilder(chatClientBuilder)
+                .numberOfQueries(numberOfQueries)
+                .build();
+        return queryExpander.expand(new Query(rewrittenQuery));
     }
 }
