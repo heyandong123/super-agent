@@ -1,0 +1,28 @@
+# 统一基础编辑约定（IntelliJ 默认支持，无需插件）。
+# 刻意不做全量格式化：仓库里 ToolCallAgent 有 856 行，整体重排会让 review 不可读。
+# 这里只固定「新建/被编辑文件」不该乱掉的东西。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.{js,vue,css,html}]
+indent_size = 2
+
+[*.md]
+# Markdown 的行尾空格是有语义的（强制换行），不能剪
+trim_trailing_whitespace = false
+
+[*.{bat,cmd}]
+end_of_line = crlf
+
+[mvnw]
+indent_size = 2
