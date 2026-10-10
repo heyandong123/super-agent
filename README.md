@@ -126,6 +126,70 @@ RAG 核心特性实战：
 
 ![AI 智能体架构图](https://pic.yupi.icu/1/AI%E6%99%BA%E8%83%BD%E4%BD%93%E6%9E%B6%E6%9E%84%E5%9B%BE.png)
 
+## 本地运行
+
+### 环境要求
+
+- JDK 21
+- Maven Wrapper（项目已自带 `./mvnw`）
+- PostgreSQL（如需连接数据库）
+- 可选：Ollama / PgVector / MCP 服务
+
+### 配置文件说明
+
+项目已按环境拆分为 4 个配置文件（3 层）：
+
+- [application.yml](src/main/resources/application.yml)：公共配置（模型、工具路由、RAG 开关等），可提交到 GitHub
+- [application-local.example.yml](src/main/resources/application-local.example.yml)：本地配置示例，可提交到 GitHub
+- `application-local.yml`：你自己机器的本地真实配置，已被 `.gitignore` 忽略，**真实密钥只放这里**
+- [application-prod.yml](src/main/resources/application-prod.yml)：生产环境覆盖配置，敏感值全部通过环境变量注入（`${DB_PASSWORD:}` 这类占位符）
+
+推荐先参考示例文件，新建一份本地配置：
+
+```bash
+cp src/main/resources/application-local.example.yml src/main/resources/application-local.yml
+```
+
+### 必要配置项
+
+至少要提供数据库与三把密钥。**两种给值方式二选一**：直接写进 `application-local.yml`（示例文件里就是 `${DEEPSEEK_API_KEY:...}` 的形式，可以改成字面量），或者用环境变量注入：
+
+```bash
+export DEEPSEEK_API_KEY='replace-me'      # 对话模型
+export DASHSCOPE_API_KEY='replace-me'     # 嵌入模型（text-embedding-v1）
+export SEARCH_API_KEY='replace-me'        # SearchAPI 联网搜索
+export DB_URL='jdbc:postgresql://localhost:5432/yu_ai_agent'
+export DB_USERNAME='postgres'
+export DB_PASSWORD='replace-me'
+```
+
+> ⚠️ 提交前请跑一次 `bash scripts/check-secrets.sh`（已挂在 git pre-commit 钩子上）自查有没有把密钥写进被跟踪的文件。
+
+### 启动项目
+
+本地默认启用 `local` profile，且默认关闭 RAG 启动期建库，便于开发调试：
+
+```bash
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+export PATH="$JAVA_HOME/bin:$PATH"
+./mvnw spring-boot:run
+```
+
+启动成功后可访问：
+
+- 接口文档：[http://localhost:8123/api/doc.html](http://localhost:8123/api/doc.html)
+- Swagger UI：[http://localhost:8123/api/swagger-ui.html](http://localhost:8123/api/swagger-ui.html)
+
+### 生产环境启动
+
+生产环境建议显式指定 `prod` profile：
+
+```bash
+SPRING_PROFILES_ACTIVE=prod ./mvnw spring-boot:run
+```
+
+生产环境下请通过环境变量提供数据库、模型和第三方服务配置，不要把真实密钥直接写入仓库。
+
 
 ## 第一期免费看
 
@@ -294,5 +358,12 @@ RAG 核心特性实战：
 - AI 应用接口开发（SSE）
 - AI 智能体接口开发
 - AI 生成前端代码
-- AI 服务 Serverless 部
+- AI 服务 Serverless 部署
 
+---
+
+## 附：本仓库当前状态（教学用途之外）
+
+- **跑测试**：`./mvnw -q -Dgroups=unit test`（9 个离线单测类，约 4 秒）。**不要直接跑 `./mvnw test`**：13 个 `@SpringBootTest` 类需要本地 PostgreSQL（`pgvector/pgvector:pg16`）+ 真实密钥，其中 4 个会打真实大模型接口（含一个 100 场景、约 40 分钟的评测）。
+- **前端**：`yu-ai-agent-frontend`（原版）与 `he-ai-agent-frontend`（本地开发版），均为 Vue 3 + Vite，接口基址硬编码 `http://localhost:8123/api`，`npm install && npm run dev` 即可。
+- **架构与约定**：见 [CLAUDE.md](CLAUDE.md)（含模型/嵌入的坑、工具体系、SSE 事件契约、分层记忆、禁区与验证命令）。
