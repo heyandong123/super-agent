@@ -1,6 +1,7 @@
 <template>
   <div class="ai-avatar-fallback" :class="type">
     <span v-if="type === 'love'">❤️</span>
+    <span v-else-if="type === 'multi'">🧠</span>
     <span v-else>🤖</span>
   </div>
 </template>
@@ -31,5 +32,9 @@ defineProps({
 
 .default, .super {
   background: linear-gradient(45deg, #3f51b5, #5677fc);
+}
+
+.multi {
+  background: linear-gradient(45deg, #009b7a, #00a8ff);
 }
 </style> 

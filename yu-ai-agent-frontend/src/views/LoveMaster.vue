@@ -33,29 +33,35 @@ import { chatWithLoveApp } from '../api'
 
 // 设置页面标题和元数据
 useHead({
-  title: 'AI恋爱大师 - 鱼皮AI超级智能体应用平台',
+  title: 'AI恋爱大师 - 恋爱大师智能体应用平台',
   meta: [
     {
       name: 'description',
-      content: 'AI恋爱大师是鱼皮AI超级智能体应用平台的专业情感顾问，帮你解答各种恋爱问题，提供情感建议'
+      content: 'AI恋爱大师是恋爱大师智能体应用平台的专业情感顾问，帮你解答各种恋爱问题，提供情感建议'
     },
     {
       name: 'keywords',
-      content: 'AI恋爱大师,情感顾问,恋爱咨询,AI聊天,情感问题,鱼皮,AI智能体'
+      content: 'AI恋爱大师,情感顾问,恋爱咨询,AI聊天,情感问题,AI智能体'
     }
   ]
 })
 
 const router = useRouter()
 const messages = ref([])
-const chatId = ref('')
 const connectionStatus = ref('disconnected')
 let eventSource = null
+
+// 会话持久化：love 接口无 session 事件回传，前端生成一次后存 sessionStorage。
+// 用 sessionStorage 而非 localStorage：每个标签页独立会话（开两个页面记忆不混淆），
+// 刷新页面复用同一会话（多轮记忆不丢），关闭标签页则下次生成新会话。
+const SESSION_STORAGE_KEY = 'yu_ai_agent_love_session'
 
 // 生成随机会话ID
 const generateChatId = () => {
   return 'love_' + Math.random().toString(36).substring(2, 10)
 }
+
+const chatId = ref(sessionStorage.getItem(SESSION_STORAGE_KEY) || generateChatId())
 
 // 添加消息到列表
 const addMessage = (content, isUser) => {
@@ -111,11 +117,10 @@ const goBack = () => {
   router.push('/')
 }
 
-// 页面加载时添加欢迎消息
+// 页面加载时添加欢迎消息（会话 ID 首次生成后即持久化）
 onMounted(() => {
-  // 生成聊天ID
-  chatId.value = generateChatId()
-  
+  sessionStorage.setItem(SESSION_STORAGE_KEY, chatId.value)
+
   // 添加欢迎消息
   addMessage('欢迎来到AI恋爱大师，请告诉我你的恋爱问题，我会尽力给予帮助和建议。', false)
 })

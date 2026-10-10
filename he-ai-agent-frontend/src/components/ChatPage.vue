@@ -35,7 +35,39 @@ const isLoading = ref(false);
 const messages = ref([]);
 const chatWindow = ref(null);
 const sseRef = ref(null);
-const chatId = ref(props.autoChatId ? `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : "");
+
+// 会话持久化：服务端生成的 conversationId + userId 存 localStorage，刷新后复用（多轮记忆不丢）
+const SESSION_STORAGE_KEY = "yu_ai_agent_session";
+function loadSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    console.warn("读取本地会话失败", e);
+    return null;
+  }
+}
+const savedSession = loadSession();
+// 有本地会话则复用；无则等服务端 session 事件下发（autoChatId 页面保留旧的客户端生成逻辑）
+const chatId = ref(savedSession?.chatId || (props.autoChatId ? `chat_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` : ""));
+const userId = ref(savedSession?.userId || "");
+
+function handleSession(data) {
+  if (!data) {
+    return;
+  }
+  if (data.conversationId) {
+    chatId.value = data.conversationId;
+  }
+  if (data.userId) {
+    userId.value = data.userId;
+  }
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ userId: userId.value, chatId: chatId.value }));
+  } catch (e) {
+    console.warn("保存本地会话失败", e);
+  }
+}
 
 function scrollToBottom() {
   nextTick(() => {
@@ -121,6 +153,7 @@ function sendMessage() {
   sseRef.value = props.streamRequest(
     text,
     chatId.value,
+    userId.value,
     (chunk) => {
       const formattedChunk = formatChunk(chunk);
       if (props.splitByStep) {
@@ -137,7 +170,8 @@ function sendMessage() {
     },
     () => {
       handleStreamEnd();
-    }
+    },
+    handleSession
   );
 }
 
@@ -152,7 +186,7 @@ onBeforeUnmount(() => {
       <button class="back-btn" @click="router.push('/')">返回主页</button>
       <div>
         <h2>{{ title }}</h2>
-        <p v-if="autoChatId" class="chat-id">会话 ID：{{ chatId }}</p>
+        <p v-if="chatId" class="chat-id">会话 ID：{{ chatId }}</p>
       </div>
     </div>
 

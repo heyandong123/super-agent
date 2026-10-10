@@ -11,36 +11,53 @@ const request = axios.create({
   timeout: 60000
 })
 
-// 封装SSE连接
-export const connectSSE = (url, params, onMessage, onError) => {
-  // 构建带参数的URL
+// 封装SSE连接(支持命名事件: session / process / final)
+export const connectSSE = (url, params, onMessage, onError, onProcess, onFinal, onSession) => {
   const queryString = Object.keys(params)
     .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
     .join('&')
-  
+
   const fullUrl = `${API_BASE_URL}${url}?${queryString}`
-  
-  // 创建EventSource
   const eventSource = new EventSource(fullUrl)
-  
-  eventSource.onmessage = event => {
-    let data = event.data
-    
-    // 检查是否是特殊标记
-    if (data === '[DONE]') {
-      if (onMessage) onMessage('[DONE]')
-    } else {
-      // 处理普通消息
-      if (onMessage) onMessage(data)
+
+  // 服务端确认会话事件：无会话时服务端生成 conversationId，连同 userId 回传前端，
+  // 前端存 localStorage 复用，保证多轮记忆不断链
+  eventSource.addEventListener('session', event => {
+    try {
+      const data = JSON.parse(event.data)
+      if (onSession) onSession(data)
+    } catch (e) {
+      if (onMessage) onMessage(event.data)
     }
+  })
+
+  eventSource.addEventListener('process', event => {
+    try {
+      const data = JSON.parse(event.data)
+      if (onProcess) onProcess(data)
+    } catch (e) {
+      if (onMessage) onMessage(event.data)
+    }
+  })
+
+  eventSource.addEventListener('final', event => {
+    try {
+      const data = JSON.parse(event.data)
+      if (onFinal) onFinal(data)
+    } catch (e) {
+      if (onMessage) onMessage(event.data)
+    }
+  })
+
+  eventSource.onmessage = event => {
+    if (onMessage) onMessage(event.data)
   }
-  
+
   eventSource.onerror = error => {
     if (onError) onError(error)
     eventSource.close()
   }
-  
-  // 返回eventSource实例，以便后续可以关闭连接
+
   return eventSource
 }
 
@@ -50,11 +67,27 @@ export const chatWithLoveApp = (message, chatId) => {
 }
 
 // AI超级智能体聊天
-export const chatWithManus = (message) => {
-  return connectSSE('/ai/manus/chat', { message })
+export const chatWithManus = (message, chatId, userId, callbacks = {}) => {
+  const params = { message }
+  if (chatId) params.chatId = chatId
+  if (userId) params.userId = userId
+  return connectSSE('/ai/manus/chat', params,
+    callbacks.onMessage, callbacks.onError,
+    callbacks.onProcess, callbacks.onFinal, callbacks.onSession)
+}
+
+// AI多智能体协调器聊天
+export const chatWithMultiAgentManus = (message, chatId, userId, callbacks = {}) => {
+  const params = { message }
+  if (chatId) params.chatId = chatId
+  if (userId) params.userId = userId
+  return connectSSE('/ai/manus/multi_agent/chat', params,
+    callbacks.onMessage, callbacks.onError,
+    callbacks.onProcess, callbacks.onFinal, callbacks.onSession)
 }
 
 export default {
   chatWithLoveApp,
-  chatWithManus
+  chatWithManus,
+  chatWithMultiAgentManus
 } 

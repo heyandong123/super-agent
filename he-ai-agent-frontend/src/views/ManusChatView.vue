@@ -2,8 +2,8 @@
 import ChatPage from "../components/ChatPage.vue";
 import { getManusChatSse } from "../services/chatApi";
 
-function streamRequest(message, _chatId, onMessage, onError, onDone) {
-  return getManusChatSse(message, onMessage, onError, onDone);
+function streamRequest(message, chatId, userId, onMessage, onError, onDone, onSession) {
+  return getManusChatSse(message, chatId, userId, onMessage, onError, onDone, onSession);
 }
 </script>
 
