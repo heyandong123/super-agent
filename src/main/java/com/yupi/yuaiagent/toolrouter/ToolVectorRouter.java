@@ -35,6 +35,9 @@ public class ToolVectorRouter {
 
     private final ToolVectorRouterProperties properties;
 
+    /** 工具暴露模式配置：full（默认）时整个路由机制旁路，启动期不再构建索引 */
+    private final ToolRoutingProperties toolRoutingProperties;
+
     private final JdbcTemplate jdbcTemplate;
 
     /**
@@ -46,10 +49,12 @@ public class ToolVectorRouter {
             @Qualifier("toolRouterVectorStore") VectorStore toolVectorStore,
             @Qualifier("allTools") ToolCallback[] allTools,
             ToolVectorRouterProperties properties,
+            ToolRoutingProperties toolRoutingProperties,
             JdbcTemplate jdbcTemplate) {
         this.toolVectorStore = toolVectorStore;
         this.allTools = allTools;
         this.properties = properties;
+        this.toolRoutingProperties = toolRoutingProperties;
         this.jdbcTemplate = jdbcTemplate;
     }
 
@@ -62,6 +67,13 @@ public class ToolVectorRouter {
      */
     @PostConstruct
     public void init() {
+        // 全量加载模式（默认）下动态路由机制整体旁路：不构建工具向量索引，
+        // 省掉启动期的 embedding 调用与对 tool_vector_store / tool_router_meta 表的依赖。
+        // 代码保留为教学素材，exposure-mode=dynamic 时可切回。
+        if (!"dynamic".equalsIgnoreCase(toolRoutingProperties.getExposureMode())) {
+            log.info("工具暴露模式为全量加载（full），跳过工具向量索引构建（动态调用机制已弃用，见 CLAUDE.md）");
+            return;
+        }
         log.info("开始索引工具描述到向量库（schemaVersion={}）...", properties.getSchemaVersion());
         // 填充内存索引文本（关键词检索兜底用）。
         // 必须放在 schema 版本检查之前：版本一致时下方会提前 return，放后面会导致内存索引为空。

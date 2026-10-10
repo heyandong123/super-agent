@@ -31,7 +31,8 @@ import java.util.regex.Pattern;
 /**
  * 工具选择准确性端到端评测（100 场景版）
  * <p>
- * 每个 case：给定任务 → 跑完整 Agent 循环（含工具路由 + searchTools/listTools 元工具）
+ * 每个 case：给定任务 → 跑完整 Agent 循环（2026-10 起默认全量加载，工具集常驻；
+ * 旧的关键词/向量路由 + searchTools/listTools 元工具仅在 exposure-mode=dynamic 时启用）
  * → 解析实际调用的工具与期望值比对。
  * 额外维度：
  * 1. 按意图分类统计命中率（search/read/write/scrape/terminal/download/pdf/chat/multi/edge）

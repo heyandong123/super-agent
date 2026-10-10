@@ -1,3 +1,16 @@
+# 本地配置示例（可提交）：真值只写你自己那份 application-local.yml（未跟踪 + 已忽略）
+#
+# 密钥集中管理（2026-10）：所有真实 key 只写 yuai.api-keys 区块，
+# 其余配置一律 ${yuai.api-keys.xxx} 引用；被跟踪文件只允许 ${ENV:默认值} 占位符。
+yuai:
+  api-keys:
+    deepseek: ${DEEPSEEK_API_KEY:replace-me}
+    dashscope: ${DASHSCOPE_API_KEY:replace-me}
+    tavily: ${TAVILY_API_KEY:replace-me}
+  rag:
+    bootstrap-enabled: false
+    store-type: memory
+
 spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/yu_ai_agent}
@@ -5,14 +18,6 @@ spring:
     password: ${DB_PASSWORD:replace-me}
   ai:
     openai:
-      api-key: ${DEEPSEEK_API_KEY:replace-me}
+      api-key: ${yuai.api-keys.deepseek}
     dashscope:
-      api-key: ${DASHSCOPE_API_KEY:replace-me}
-
-search-api:
-  api-key: ${SEARCH_API_KEY:replace-me}
-
-yuai:
-  rag:
-    bootstrap-enabled: false
-    store-type: memory
+      api-key: ${yuai.api-keys.dashscope}

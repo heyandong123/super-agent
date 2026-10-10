@@ -4,15 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-Spring AI 1.0 教学项目（AI 智能体平台）：ReAct 自主智能体（YuManus）、多智能体协调器（YuManusMultiAgent）、工具动态调用机制（元工具 / 语义路由 / 降级链 / 熔断）、分层记忆（画像 + 摘要 + 向量归档）、RAG（PGVector）、SSE 流式输出。代码注释为中文；教学性注释与 TODO 是刻意保留的教程素材，不要清理。
+Spring AI 1.0 教学项目（AI 智能体平台）：ReAct 自主智能体（YuManus）、多智能体协调器（YuManusMultiAgent）、工具全量加载（默认）与动态调用机制（元工具 / 语义路由 / 降级链 / 熔断，保留为教学/回退）、分层记忆（画像 + 摘要 + 向量归档）、RAG（PGVector）、SSE 流式输出。代码注释为中文；教学性注释与 TODO 是刻意保留的教程素材，不要清理。
 
 ## 终极目标（每一次优化的北极星）
 
-把本项目的 agent 做成**高性能、高可用、低延迟、低 token 消耗**、能真正落地解决真实问题的智能体。所有优化必须遵守三条准则：
+把本项目的 agent 做成**高性能、高可用、低延迟、低 token 消耗**、能真正落地解决真实问题的智能体。所有优化必须遵守四条准则：
 
 1. **对标业界最强，禁止凭空设计**：每次优化前先调研业界最强 agent（Claude Code、OpenHands、Manus、OpenAI Agents SDK 等）对同一问题的做法，在方案中写明「参考对象 / 其机制 / 本项目的取舍与理由」；没有参照对象的方案不进入执行。
 2. **优化必须可度量**：每次优化完成后必须跑效果评测并给出**具体指标**（端到端延迟、token 消耗、工具选择准确率、任务成功率、失败率等），与优化前对比；**没有指标数字的优化不算完成**。评测入口见「评测体系」一节，新指标要落到测试或脚本里。
 3. **四个维度一起取舍**：性能（吞吐/并发）、可用性（失败可恢复、不挂死、可观测）、延迟（端到端）、token 成本（上下文压缩、工具结果裁剪、路由与元工具开销），与正确性并列，作为每个方案的取舍依据。
+4. **可讲述性（本项目的现实使命是成为一份能拿到 Java/Agent 实习 offer 的作品）**：每一次改进除了指标，还要沉淀成面试里讲得清的一个点——**「问题 → 业界怎么做 → 我的取舍 → 实测数字」**；方案文档里的「面试口径」一节就是它的落地形式。面试官考察的是决策过程而不是功能清单，说不清「为什么这么改」的改动等于没做。反过来，为了简历好看而堆的、讲不出取舍的「闪光点」（跟风选型、无对照的新技术）不算闪光点——真闪光点 = 别人踩过的坑 + 你量化过的解法。
 
 ## 常用命令
 
@@ -24,7 +25,7 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 21)   # 需要 JDK 21
 ./mvnw test -Dtest=ToolPathUtilsTest        # 跑单个测试类（逗号分隔可跑多个）
 ```
 
-**⚠️ 绝对不要直接跑 `./mvnw test`**：24 个测试类里 13 个是 `@SpringBootTest`（要 Docker PG + application-local.yml 的真实 key），其中 **4 个无门控地打真实外部调用**——`ToolSelectionAccuracyTest`（100 场景、300~400 次 LLM 调用、35~40 分钟，现已加 `RUN_TOOL_EVAL` 门控）、`LoveAppTest`（3 轮真实对话）、`AiControllerTest`（1 轮真实对话，走 RAG）、以及联网的 `WebSearchToolTest`/`WebScrapingToolTest`。剩下 11 个非 Spring 类是可信的离线子集，其中 9 个标了 `@Tag("unit")`，一条命令跑完（约 4 秒，36 用例）：
+**⚠️ 绝对不要直接跑 `./mvnw test`**：27 个测试类里 14 个是 `@SpringBootTest`（要 Docker PG + application-local.yml 的真实 key），其中 **4 个无门控地打真实外部调用**——`ToolSelectionAccuracyTest`（100 场景、300~400 次 LLM 调用、35~40 分钟，现已加 `RUN_TOOL_EVAL` 门控）、`LoveAppTest`（3 轮真实对话）、`AiControllerTest`（1 轮真实对话，走 RAG）、以及联网的 `WebSearchToolTest`/`WebScrapingToolTest`。剩下 13 个非 Spring 类里 **11 个标了 `@Tag("unit")`**（离线子集，一条命令跑完，约 5 秒 44 用例；其中 `ResourceDownloadToolTest` 会真实下载 example.com，非严格离线），另外 2 个是联网的 `WebSearchToolTest`/`WebScrapingToolTest`（未标 tag，不随分组跑）：
 
 ```bash
 ./mvnw -q -Dgroups=unit test      # 等价 CI 命令；新增离线测试请照抄类上的 @Tag("unit")
@@ -46,7 +47,7 @@ RUN_MEMORY_EVAL=true ./mvnw test -Dtest=MemoryUpdateServiceTest
 
 ### Agent 继承链与"手动 new"约定
 
-`BaseAgent`（执行循环 + 状态机 + SSE + 记忆钩子）→ `ReActAgent`（think/act 拆分）→ `ToolCallAgent`（工具路由/降级/上下文压缩/熔断/重试/L2 缓存）→ `YuManus`（maxSteps 20）/ `SearchAgent`（3）/ `DocumentAgent`（6）；`YuManusMultiAgent` **直接继承 BaseAgent**（自己不碰工具，见下）。
+`BaseAgent`（执行循环 + 状态机 + SSE + 记忆钩子）→ `ReActAgent`（think/act 拆分）→ `ToolCallAgent`（工具暴露/降级/上下文压缩/熔断/重试；关键词+向量路由与 L2 会话缓存仅 dynamic 模式）→ `YuManus`（maxSteps 20）/ `SearchAgent`（3）/ `DocumentAgent`（6）；`YuManusMultiAgent` **直接继承 BaseAgent**（自己不碰工具，见下）。
 
 **关键约定**：Controller 每次请求 `new` Agent，不注入单例（`YuManus` 的 @Component 是死代码，Agent 状态非线程安全）。`ToolVectorRouter` 和 `ToolRoutingProperties` 必须沿构造器链显式传递（AiController → YuManus/YuManusMultiAgent → 子 Agent），**不要用 setter 或 @Autowired 注入**——这是历史 bug 的修复方向。AiController 自身用 `@Resource` 字段取依赖，再手动 new Agent。
 
@@ -59,19 +60,21 @@ RUN_MEMORY_EVAL=true ./mvnw test -Dtest=MemoryUpdateServiceTest
 
 ### 工具体系（四层来源）
 
-1. **内置工具**：`tools/ToolRegistration.java` 的 `allTools` Bean = 8 个方法（readFile/writeFile/searchWeb/scrapeWebPage/downloadResource/executeTerminalCommand/generatePDF/doTerminate）。业务工具用 `@Tool`/`@ToolParam`，工具名 = 方法名（**不写 name 属性**）。
+1. **内置工具**：`tools/ToolRegistration.java` 的 `allTools` Bean = 8 个方法（readFile/writeFile/searchWeb/scrapeWebPage/downloadResource/executeTerminalCommand/generatePDF/doTerminate）。业务工具用 `@Tool`/`@ToolParam`，工具名 = 方法名（**不写 name 属性**）。`searchWeb` 的降级链是 **Tavily（主链路，key 读 `yuai.api-keys.tavily`，OkHttp 显式超时 10/15/20s）→ 百度 → Bing**（原 SearchAPI 随 key 泄露弃用而移除）。
 2. **命名工具数组**：同文件另有 `searchTools`/`documentTools`/`executionTools` 三个 `ToolCallback[]` Bean，给多智能体的子 Agent 分工具集用（`executionTools` 目前无人引用）。
 3. **MCP 工具**：`mcp-servers.json` 装配出 ToolCallbackProvider，AiController 的 `mcpTools()` 运行时合并（当前仅 searchImage）。**不进向量索引**。注意该 json 里是 MCP 服务 jar 的**绝对路径**，换机器或未 `mvn package` 该子项目时 MCP 工具会静默消失。
-4. **元工具**：`ToolSearchTool`/`ListToolsTool`/`SearchMemoryTool` 在 `ToolCallAgent` 构造器内 per-agent new、追加进 availableTools——**不注册 Bean、不进 allTools、不进索引**。这三个与业务工具相反，**显式写了 `@Tool(name = ...)`**。searchTools 持有 Agent 的 L2 集合直接引用写入，靠 `ToolCallbacks.from()` 包装（它返回包装对象，拿不回原实例，所以构造器里先存原实例引用）。
+4. **元工具**：`SearchMemoryTool` 在 `ToolCallAgent` 构造器内 per-agent new、追加进 availableTools——**不注册 Bean、不进 allTools、不进索引**，与业务工具相反**显式写了 `@Tool(name = ...)`**。`ToolSearchTool`/`ListToolsTool` 只在 `exposure-mode=dynamic` 时创建（默认 full 模式不注册），源码保留为教学素材；dynamic 下 searchTools 持有 Agent 的 L2 集合直接引用写入，靠 `ToolCallbacks.from()` 包装（它返回包装对象，拿不回原实例，所以构造器里先存原实例引用）。
 
-### 工具动态调用机制
+### 工具暴露模式（full 全量加载为默认；dynamic 为教学/回退）
 
-- 每轮暴露集合 = L1 元工具（searchTools/listTools/searchMemory）∪ `fixed-tools` 配置 ∪ L2 会话缓存 ∪ 本轮路由结果（`selectToolsForCurrentStep`）
-- 路由 = 关键词（`routeToolNames` 硬编码分组）+ 向量（`ToolVectorRouter`，表 `tool_vector_store`，threshold 0.45 / topK 2，**调优过的值，别改回 0.2/5**——那会让 topK 每轮饱和、路由失效）取并集；`schema-version` 递增会在启动时清空重建索引（改工具集时要 +1）
-- 两条兜底：路由结果与 availableTools 完全不匹配 → 回退全量；只剩 doTerminate 时**不回退**（纯聊天场景本来就该只给 doTerminate）。全部工具被熔断时只放行 doTerminate
+- **默认 `yuai.tool-routing.exposure-mode: full`（2026-10 工具重构引入）**：每轮把全部常驻工具原样发给模型，不做关键词/向量路由，也不注册 searchTools/listTools。对标 Claude Code / OpenHands 的固定工具面，以及 Manus "Mask, don't remove"（任务中途不增删工具，请求前缀稳定、缓存友好）。决策过程与实测数字见 docs/tool-refactor-plan.md §9
+- full 模式的真实 schema 开销（`ToolSchemaBudgetTest` 可复现）：常驻 9 个工具 5860 字符 ≈ 1465 tokens/次 LLM 调用；相对 dynamic 省掉每步一次路由 embedding 往返（延迟↓），代价是 schema 多几百 tokens/次
+- **dynamic 是保留的教学/回退能力**：实现完整保留在 `routeToolsForCurrentStep`——暴露集合 = 元工具（searchTools/listTools/searchMemory）∪ `fixed-tools` ∪ L2 会话缓存 ∪ 本轮路由结果；路由 = 关键词（`routeToolNames` 硬编码分组）∪ 向量（`ToolVectorRouter`，表 `tool_vector_store`，threshold 0.45 / topK 2，**调优过的值，别改回 0.2/5**——那会让 topK 每轮饱和、路由失效）；`schema-version` 递增在 dynamic 启动时清空重建索引（改工具集时要 +1）
+- dynamic 的两条兜底：路由结果与 availableTools 完全不匹配 → 回退全量；只剩 doTerminate 时**不回退**（纯聊天场景本来就该只给 doTerminate）
+- 熔断过滤两种模式共用：全部工具被熔断时只放行 doTerminate
 - 容错常量：单次工具调用 30s 超时、失败重试 2 次、同一工具连续失败 3 次熔断 60s；`chatOptions` 关闭自动执行与并行调用、maxTokens 1024
 - 上下文压缩：消息数 > 15 时把前段用 LLM 摘要成一条 SystemMessage（保留最近 6 条）
-- searchTools 降级链：语义（阈值常量硬编码 0.2，**与 yml 里给路由用的 0.45 不是一回事**）→ 阈值放宽（×0.5、topK×2）→ 关键词回退 → 结构化失败提示
+- searchTools 降级链（仅 dynamic）：语义（阈值常量硬编码 0.2，**与 yml 里给路由用的 0.45 不是一回事**）→ 阈值放宽（×0.5、topK×2）→ 关键词回退 → 结构化失败提示
 - `buildRoutingContext` 排除 ToolResponseMessage 防关键词污染（RAG 检索共用）；路由关键词一律走 `KeywordMatcher.containsAnyWord`（英文按词边界），**别退回 `String.contains`**——`"file"` 会命中记忆注入的 `[User Profile]`、`"ls"` 会命中 `tools`/`results`
 - `doTerminate` 带必填 `taskChecklist`；act() 终止前用 LLM 做三方比对（原始任务 + 自述清单 + 工具执行证据），遗漏则拒绝终止并反馈模型；校验调用本身失败时 fail-open
 - SearchAgent 专属裁剪：`limitRedundantToolCalls` 去掉重复的 around_search / searchWeb，`isSearchAgentToolFailure` 遇 429 / "no search results" 直接置 FINISHED
@@ -122,11 +125,12 @@ RUN_MEMORY_EVAL=true ./mvnw test -Dtest=MemoryUpdateServiceTest
 
 - `ToolSelectionAccuracyTest`：100 场景端到端，`EVAL_CASE_COUNT` 采样 / `EVAL_ROUNDS` 多数投票 / `EVAL_CATEGORY` 类别过滤；判定解析 act() 拼接的"工具 xxx 返回的结果"，write/pdf 类另做产物验证。已知局限：工具路径判据会误杀 shell 重定向等替代方案（靠产物验证兜底）
 - `LayeredMemoryEvaluationTest`：需 `RUN_MEMORY_EVAL=true`；断言画像抽取/覆盖与三段 prompt 区块存在（当前签名过时，见开头警告）
+- `ToolLatencyBenchmarkTest`：各工具**真实调用**延迟 p50/p95/max + 返回体积（未标 `@Tag("unit")`，需网络与 `TAVILY_API_KEY`，显式 `-Dtest=ToolLatencyBenchmarkTest` 跑；运行命令见类注释）。2026-10-10 基线（Mac/JDK21）：**本地工具全部 ≤43ms**（readFile 分页 1ms、generatePDF 9ms、terminal 4ms、writeFile/doTerminate <1ms），联网工具 searchWeb(Tavily) p50 1.9s、scrapeWebPage 0.6s、downloadResource 0.45s。结论：**端到端延迟由 LLM 轮次决定，工具本身不是瓶颈**；工具侧最坏情况有界（外层 30s + 各工具自身 10/15/20/30s 超时）。searchWeb 单次返回 ~6.5KB（5 条结果）是最大结果面
 
 ## 已知问题（改动前注意）
 
 - **`./mvnw test` 在干净构建下必然失败**（13 个 `@SpringBootTest` 要 PG + 真实 key，且其中 4 个会打真实 LLM/外网，详见文首）——只跑指定的离线子集
-- 死代码：`PDFGenerationToolPro`（未注册）、`ToolRegistration.executionTools`（无人引用）、`chatmemory/FileBasedChatMemory`（被 Kryo 版取代）、`ToolCallAgent.setToolVectorRouter`。工具总数按"8 内置 + 3 元工具 + MCP"算，别再按 11/12 数。**`AiController.chatModel` 不是死代码**：它是 `:151`/`:174` 构造 Agent 时的实参
+- 死代码：`PDFGenerationToolPro`（未注册）、`ToolRegistration.executionTools`（无人引用）、`chatmemory/FileBasedChatMemory`（被 Kryo 版取代）、`ToolCallAgent.setToolVectorRouter`。工具总数按「8 内置 + searchMemory + MCP」算（full 模式常驻面）；dynamic 模式再加 searchTools/listTools 两个元工具。别再按 11/12 数。**`AiController.chatModel` 不是死代码**：它是 `:151`/`:174` 构造 Agent 时的实参
 - **`YuManusMultiAgent` 的失败语义**（未修）：`BaseAgent.run` 把异常吞成 `"出错了：..."` 字符串返回，所以 `executeSubTask` 的 `catch` 几乎不触发，子任务 `success` 恒为 true；最终答案还会被合成两次（协调器一次 + `buildFinalSummary` 一次，SSE `final` 用的是后者）。要动就得改 `run()` 的返回契约，牵动所有调用方
 - 教学素材别清理：44 处 TODO 与成段的原理注释是课程内容
 
@@ -141,11 +145,19 @@ RUN_MEMORY_EVAL=true ./mvnw test -Dtest=MemoryUpdateServiceTest
 - **he 前端不渲染正文**：`chatApi.js` 补 `process`/`final` 具名监听 + `onmessage` 兜底
 - **3 个测试类签名过时**导致的 test 编译失败（见文首）
 
+### 工具重构轮（2026-10-10：全量加载 + 描述重写 + 护栏）
+
+- **暴露模式改全量加载**（见「工具暴露模式」节）：`ToolRoutingProperties.exposureMode` 默认 `full`；full 下 `ToolCallAgent` 构造器只注册 searchMemory，`selectToolsForCurrentStep` 直接返回全量（原路由整体挪进 `routeToolsForCurrentStep`），`ToolVectorRouter.init()` 不再构建索引（也就摆脱了 tool_router_meta / tool_vector_store 的启动依赖）
+- **描述重写**（readFile/writeFile/searchWeb/scrapeWebPage/downloadResource/generatePDF）：写明沙箱路径、分页/截断、协议与大小限制、能力边界；教学 TODO 全部保留，改动的描述旁加了"重构轮"对照注释；`schema-version` 2→3
+- **新护栏**：readFile 支持 offset/limit（默认 500 行 / 硬上限 2000 行 / 32KB 字符上限，超限输出翻页提示，越界 offset 返回带指引的 Error）；scrapeWebPage 显式 10s 超时 + 浏览器 UA；downloadResource 仅 http/https、30s 超时、20MB 上限（超限删除并报错）、文件名改走 `ToolPathUtils`
+- **测试**：新增 `ToolGuardrailTest` 7 例（离线）；`ToolSearchToolUnitTest` 显式传 `dynamic`（该测试直接调 `router.init()`，full 下会旁路早退）；`ResourceDownloadToolTest`/`FileOperationToolTest` 跟进新签名
+
 ## 代码规范
 
 - 注释、日志、文档一律中文；成段原理注释与 `// TODO` 是教学素材，只增不删
 - 新增业务工具：`@Tool` + `@ToolParam`，**工具名 = 方法名，不写 `name` 属性**；元工具相反——必须显式 `@Tool(name = ...)` 且不注册 Bean、不进索引
-- 增删工具或改工具描述后，必须把工具索引的 `schema-version` 递增（启动时据此清空重建），否则路由检索到的还是旧工具
+- 增删工具或改工具描述后，把 `yuai.tool-router.schema-version` 递增（dynamic 模式启动时据此清空重建索引；full 模式不建索引，递增是为切回 dynamic 时能正确重建）
+- 工具 description 是模型唯一的接口文档：写清前置条件、参数语义、返回结构与限制（截断/超时/大小上限），别只写一句功能名；能力边界（做不到什么）也要写，减少误选
 - 文件路径统一走 `ToolPathUtils.resolveFilePath`；资源释放/进程管理参考 `TerminalOperationTool`（必须有超时与销毁）
 - 依赖注入：Controller 用 `@Resource` 字段取依赖再手动 `new` Agent；`ToolVectorRouter` / `ToolRoutingProperties` 只走构造器链，**不加 setter、不加 @Autowired**
 - 同类型多 Bean（3 个 VectorStore）必须 `@Qualifier` / `@Resource(name=...)`，否则报 "required a single bean"
@@ -156,7 +168,7 @@ RUN_MEMORY_EVAL=true ./mvnw test -Dtest=MemoryUpdateServiceTest
 
 - **绝不把真实密钥写进任何被跟踪的文件**（真值只放 `application-local.yml`，见下节）
 - 不要把 RAG 重新接回 `YuManus`（`ToolCallAgent.ragVectorStore` 恒为 null 是刻意回滚的结果）
-- 不要动 `ToolVectorRouter` 的 `0.45 / topK 2`（调优过的值；改回 0.2/5 会让 topK 每轮饱和、路由失效）
+- 不要动 `ToolVectorRouter` 的 `0.45 / topK 2`（调优过的值；改回 0.2/5 会让 topK 每轮饱和、路由失效。仅 dynamic 模式生效）
 - 不要清理教学 TODO / 原理注释；不要"顺手"整体格式化 `ToolCallAgent`（856 行）
 - 不要给 Agent 加单例或共享状态：状态机与 `messageList` 非线程安全，Controller 每请求 new 一个
 - 不要在没开对应环境变量开关时跑评测类（真实 LLM 计费，最长 40 分钟）
@@ -168,7 +180,7 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 21)
 
 ./mvnw -q -DskipTests compile      # 改完 main 代码
 ./mvnw -q test-compile             # 改完测试
-./mvnw -q -Dtest='KeywordMatcherTest,BaseAgentLifecycleTest,TerminalOperationToolTest,ToolPathUtilsTest,ToolSearchToolUnitTest' test
+./mvnw -q -Dtest='KeywordMatcherTest,BaseAgentLifecycleTest,TerminalOperationToolTest,ToolPathUtilsTest,ToolSearchToolUnitTest,ToolGuardrailTest,ToolSchemaBudgetTest' test
 bash scripts/check-secrets.sh      # 提交前；期望 0 命中
 (cd he-ai-agent-frontend && npm run build)
 # 冒烟（需本地 key + 已启动服务）：
@@ -180,8 +192,9 @@ curl -N -H 'Accept: text/event-stream' 'http://localhost:8123/api/ai/manus/chat?
 
 ## 密钥政策与事故记录
 
-- **真值只允许出现在 `application-local.yml`**（未跟踪且被 `.gitignore` 忽略）；被跟踪的 `application.yml` / `application-prod.yml` 一律用 `${ENV:默认值}` 占位符
+- **真值只允许出现在 `application-local.yml`**（未跟踪且被 `.gitignore` 忽略）；被跟踪的 `application.yml` / `application-prod.yml` / `application-local.example.yml` 一律用 `${ENV:默认值}` 占位符
+- **密钥集中管理（2026-10 起）**：所有真实 key 只写 `application-local.yml` 的 `yuai.api-keys` 区块（现有 `deepseek` / `dashscope` / `tavily`），其余配置（含同一文件的下半段）一律写 `${yuai.api-keys.xxx}` 引用；新增第三方 key 时**同步给 `scripts/check-secrets.sh` 补前缀规则**（已有 `sk-` 与 `tvly-` 两条 + 打码规则 + RE_KV 键名表）——只加配置不加规则，守卫就拦不住这类 key
 - 提交前必跑 `bash scripts/check-secrets.sh`（已通过 `git config core.hooksPath .githooks` 挂在 pre-commit 上；它同时扫描"未跟踪但未被忽略"的文件，防止新文件带着 key 溜进去）
-- **2026-10 事故记录（已收口）**：提交 `3fdb175`（"更新了1.txt"）曾把 4 个真实凭据推进公开 fork——阿里云 RDS 口令（账号 `yu_ai_agent` @ 某实例）、DashScope API Key、SearchAPI Key、高德地图 API Key（`mcp-servers.json`）。最终处置：**RDS 实例长期停机**（连接不可达，口令等于失效；日后若重新开机，第一件事是改密并检查白名单）；**DashScope key 已作废重建**（旧 key 实测 `401 API-key is blocked`，新 key 实测嵌入返回 1536 维正常）；**SearchAPI key 弃用**（search 工具待重写，应去 searchapi.io 撤销该 key 而非重建）；**高德 key 所在配置整段删除**（若该 key 仍有效，去高德开放平台撤销）；**GitHub fork 已删除**、账号改名。**教训：删远端不会收回已泄露的 key，轮换/撤销才是把风险归零的动作；判断"有没有进过 git 历史"要用 `git log -S '< 片段>'`，不能只看当前文件**
+- **2026-10 事故记录（已收口）**：提交 `3fdb175`（"更新了1.txt"）曾把 4 个真实凭据推进公开 fork——阿里云 RDS 口令（账号 `yu_ai_agent` @ 某实例）、DashScope API Key、SearchAPI Key、高德地图 API Key（`mcp-servers.json`）。最终处置：**RDS 实例长期停机**（连接不可达，口令等于失效；日后若重新开机，第一件事是改密并检查白名单）；**DashScope key 已作废重建**（旧 key 实测 `401 API-key is blocked`，新 key 实测嵌入返回 1536 维正常）；**SearchAPI key 已撤销**（2026-10-10 用户在 searchapi.io 后台撤销；search 工具已改用 **Tavily** 主链路）；**高德 key 所在配置整段删除**（若该 key 仍有效，去高德开放平台撤销）；**GitHub fork 已删除**、账号改名。**教训：删远端不会收回已泄露的 key，轮换/撤销才是把风险归零的动作；判断"有没有进过 git 历史"要用 `git log -S '< 片段>'`，不能只看当前文件**
 - 推送前检查清单：`git log main --pickaxe-regex -S 'sk-[A-Za-z0-9_-]{20,}'` 无命中（只查新历史；守卫脚本自身的规则串不会自命中）、`bash scripts/check-secrets.sh` 通过、`git check-ignore application-local.yml` 有输出
 - **仓库历史布局（提交轮 2026-10-10 重建）**：`main` = 全新历史（12 个提交：1 基线 + 10 主题 + 1 文档，明文凭据从未进入）；`master` / `develop` = 旧历史，仅本地对照，**永不推送**。远端：`origin` = `heyandong123/super-agent`（推送目标）、`upstream` = `liyupi/yu-ai-agent`（只读拉更新）

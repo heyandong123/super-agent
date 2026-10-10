@@ -52,12 +52,16 @@ class ToolSearchToolUnitTest {
                 new FakeDownloadTool(),
                 new FakeSearchTool(),
                 new FakeTerminateTool());
+        // 本测试验证的正是动态调用机制的组件，需显式设为 dynamic 模式：
+        // 默认 full 模式下 ToolVectorRouter.init() 会旁路早退，内存索引为空，关键词回退用例会失败
+        ToolRoutingProperties routingProperties = new ToolRoutingProperties();
+        routingProperties.setExposureMode("dynamic");
         ToolVectorRouter router = new ToolVectorRouter(
-                vectorStore, registry, new ToolVectorRouterProperties(), jdbcTemplate);
+                vectorStore, registry, new ToolVectorRouterProperties(), routingProperties, jdbcTemplate);
         // 手动触发 init() 填充内存索引（单元测试无 Spring 容器，@PostConstruct 不会执行）
         router.init();
         discoveredTools = ConcurrentHashMap.newKeySet();
-        toolSearchTool = new ToolSearchTool(router, registry, discoveredTools, new ToolRoutingProperties());
+        toolSearchTool = new ToolSearchTool(router, registry, discoveredTools, routingProperties);
     }
 
     @Test

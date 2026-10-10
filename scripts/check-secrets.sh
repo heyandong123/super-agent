@@ -35,10 +35,12 @@ while IFS= read -r f; do
 done < "$list"
 
 # ---------------------------------------------------------------- 规则
-# 规则一：各家 API Key 的固定形态（sk- 系）
+# 规则一：各家 API Key 的固定形态（sk- 系 / tvly- 系）
+# 新增第三方服务时：把该家 key 的固定前缀补成一条规则（如 tvly- 之于 Tavily）
 RE_KEY='sk-[A-Za-z0-9_-]{20,}'
+RE_KEY_TAVILY='tvly-[A-Za-z0-9_-]{20,}'
 # 规则二：键值对形态。值要求 ≥12 位，避免把 token = getToken() 这类代码误判成凭据
-RE_KV='(api[-_]?key|apikey|password|passwd|secret|access[-_]?key|accesskey|private[-_]?key|token)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9@#$%^&*_+./-]{12,}'
+RE_KV='(api[-_]?key|apikey|tavily|password|passwd|secret|access[-_]?key|accesskey|private[-_]?key|token)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9@#$%^&*_+./-]{12,}'
 
 # 放行：占位符/文档说明（${VAR}、<REDACTED>、your-api-key、示例、CHANGE_ME、xxxx）
 # 放行：URL 查询串里的 ?token= / &key=（推广链接、跳转地址，不是我们的凭据）
@@ -60,6 +62,7 @@ scan() {
     masked=$(printf '%s' "$body" \
       | sed -E \
           -e 's/(sk-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]+/\1****/g' \
+          -e 's/(tvly-[A-Za-z0-9_-]{4})[A-Za-z0-9_-]+/\1****/g' \
           -e 's/[:=][[:space:]]*[^[:space:]]{6,}/: ****/g' \
       | cut -c1-100)
     printf '  %s  [%s]  %s\n' "$loc" "$label" "$masked"
@@ -68,6 +71,7 @@ scan() {
 
 # 注意 $(...) 会吃掉末尾换行，所以换行要写在命令替换外面
 report+=$(scan "API-Key" "$RE_KEY")$'\n'
+report+=$(scan "Tavily-Key" "$RE_KEY_TAVILY")$'\n'
 report+=$(scan "键值对"  "$RE_KV")$'\n'
 # 同一行被两条规则同时命中时只报一次（保留先出现的 API-Key 形态，信号更强）
 report=$(printf '%s\n' "$report" | grep -v '^$' | awk '!seen[$1]++' || true)
@@ -86,10 +90,13 @@ fi
 
 # ---------------------------------------------------------------- 附加检查
 # 真值文件必须仍处于忽略状态（防止有人把它从 .gitignore 里删掉）
-if [ -f application-local.yml ] && ! git check-ignore -q application-local.yml; then
-  fail=1
-  echo "❌ application-local.yml 已不再被 .gitignore 忽略，随时可能被提交"
-fi
+# 注意要查真实路径 src/main/resources/application-local.yml（曾只查仓库根目录，等于没查）
+for f in application-local.yml src/main/resources/application-local.yml; do
+  if [ -f "$f" ] && ! git check-ignore -q "$f"; then
+    fail=1
+    echo "❌ $f 已不再被 .gitignore 忽略，随时可能被提交"
+  fi
+done
 
 if [ "$fail" -ne 0 ]; then
   echo "真值只写 application-local.yml（未跟踪 + 已忽略），被跟踪文件一律用 \${ENV:default} 占位符。"

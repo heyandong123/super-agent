@@ -55,9 +55,10 @@ yuai:
     similarity-threshold: 0.45  # 0.2 时 topK 每轮饱和、路由退化为"删掉几个无关工具"，抬到 0.45 才真正有筛选力
     dimensions: 1536
     vector-table-name: tool_vector_store
-    schema-version: 2  # 工具集变更时递增此值，启动时自动重建向量索引（v1 时旧代码累积了 32 条重复索引，升到 v2 触发清空重建）
+    schema-version: 4  # 工具集/描述变更时递增此值（exposure-mode=dynamic 时启动重建索引；v4 = searchWeb 改用 Tavily 主链路）
   tool-routing:
-    fixed-tools: []  # 可选：额外每轮固定暴露的工具名
+    exposure-mode: full  # full（默认）=全量加载，动态调用机制弃用（代码保留为教学素材）；dynamic=旧的四层动态调用机制
+    fixed-tools: []  # 可选：额外每轮固定暴露的工具名（仅 dynamic 模式生效）
     search-top-k: 3
     relaxed-threshold-factor: 0.5
     list-page-size: 10

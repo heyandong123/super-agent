@@ -113,7 +113,7 @@
 - ⭐️ AI 大模型开发平台百炼
 - ⭐️ Cursor AI 代码生成
 - ⭐️ SSE 异步推送
-- 第三方接口：如 SearchAPI / Pexels API
+- 第三方接口：如 Tavily（联网搜索）/ Pexels API
 - Ollama 大模型部署
 - 工具库如：Kryo 高性能序列化 + Jsoup 网页抓取 + iText PDF 生成 + Knife4j 接口文档
 
@@ -144,6 +144,8 @@ RAG 核心特性实战：
 - `application-local.yml`：你自己机器的本地真实配置，已被 `.gitignore` 忽略，**真实密钥只放这里**
 - [application-prod.yml](src/main/resources/application-prod.yml)：生产环境覆盖配置，敏感值全部通过环境变量注入（`${DB_PASSWORD:}` 这类占位符）
 
+**密钥集中管理**：所有真实 key 只写 `application-local.yml` 的 `yuai.api-keys` 区块（deepseek / dashscope / tavily），其余配置一律用 `${yuai.api-keys.xxx}` 引用；被跟踪的文件只允许 `${ENV:默认值}` 占位符。
+
 推荐先参考示例文件，新建一份本地配置：
 
 ```bash
@@ -157,7 +159,7 @@ cp src/main/resources/application-local.example.yml src/main/resources/applicati
 ```bash
 export DEEPSEEK_API_KEY='replace-me'      # 对话模型
 export DASHSCOPE_API_KEY='replace-me'     # 嵌入模型（text-embedding-v1）
-export SEARCH_API_KEY='replace-me'        # SearchAPI 联网搜索
+export TAVILY_API_KEY='replace-me'        # Tavily 联网搜索（https://tavily.com，免费额度够开发用）
 export DB_URL='jdbc:postgresql://localhost:5432/yu_ai_agent'
 export DB_USERNAME='postgres'
 export DB_PASSWORD='replace-me'

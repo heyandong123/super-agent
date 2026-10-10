@@ -123,18 +123,27 @@ public class ToolCallAgent extends ReActAgent {
         this.toolVectorRouter = toolVectorRouter;
         this.toolRoutingProperties = toolRoutingProperties;
         this.conversationMemoryService = conversationMemoryService;
-        // 元工具：每个 Agent 实例持有一份，searchTools 直写本实例的 L2 会话缓存。
-        // 先保存实例引用（ToolCallbacks.from 返回的是包装对象，拿不回原实例），再包装合并。
-        this.toolSearchTool = new ToolSearchTool(
-                toolVectorRouter, availableTools, sessionDiscoveredTools, toolRoutingProperties);
         // searchMemory：对话记忆检索。会话 ID 构造期还没设置（setter 在 new 之后调用），
         // 所以用 Supplier 在调用时才读取，null 时工具降级为结构化提示。
+        // searchMemory 是记忆能力而非"工具发现"，两种暴露模式下都常驻。
         this.searchMemoryTool = new SearchMemoryTool(
                 conversationMemoryService, this::getConversationId);
-        ToolCallback[] metaTools = ToolCallbacks.from(
-                toolSearchTool,
-                new ListToolsTool(availableTools, toolRoutingProperties.getListPageSize()),
-                searchMemoryTool);
+        ToolCallback[] metaTools;
+        if (isFullExposureMode()) {
+            // 全量加载模式（默认）：不注册 searchTools/listTools 这两个"工具发现"元工具，
+            // 动态调用机制整体旁路（类的源码保留为教学素材，见 ToolRoutingProperties#exposureMode）。
+            metaTools = ToolCallbacks.from(searchMemoryTool);
+        } else {
+            // 动态调用模式（教学/回退）：元工具每个 Agent 实例持有一份，
+            // searchTools 直写本实例的 L2 会话缓存。
+            // 先保存实例引用（ToolCallbacks.from 返回的是包装对象，拿不回原实例），再包装合并。
+            this.toolSearchTool = new ToolSearchTool(
+                    toolVectorRouter, availableTools, sessionDiscoveredTools, toolRoutingProperties);
+            metaTools = ToolCallbacks.from(
+                    toolSearchTool,
+                    new ListToolsTool(availableTools, toolRoutingProperties.getListPageSize()),
+                    searchMemoryTool);
+        }
         // 原始工具 + 元工具合并为完整武器库（注意元工具不参与向量索引，见 ToolVectorRouter 只索引 allTools）
         this.availableTools = Stream.concat(Arrays.stream(availableTools), Arrays.stream(metaTools))
                 .toArray(ToolCallback[]::new);
@@ -600,10 +609,57 @@ public class ToolCallAgent extends ReActAgent {
         return historyText.substring(0, fallbackLength);
     }
 
+    /**
+     * 是否处于"全量加载"暴露模式（默认）。
+     * full：每轮暴露全部工具，不做关键词/向量路由（动态调用机制整体旁路）；
+     * dynamic：旧的四层动态调用机制（元工具 + 路由 + L2 缓存），保留为教学/回退能力。
+     */
+    private boolean isFullExposureMode() {
+        return toolRoutingProperties == null
+                || !"dynamic".equalsIgnoreCase(toolRoutingProperties.getExposureMode());
+    }
+
+    /**
+     * 选择本轮暴露给模型的工具集合。
+     * <p>
+     * 默认走"全量加载"模式：每轮暴露同一套工具，不做关键词/向量路由——
+     * 与 Claude Code / OpenHands 的固定工具面一致，也符合 Manus 的
+     * "Mask, don't remove"（任务中途不增删工具，保持请求前缀稳定、缓存友好）。
+     * 动态调用机制仅在 exposure-mode=dynamic 时启用（教学/回退）。
+     */
     private ToolCallback[] selectToolsForCurrentStep() {
+        ToolCallback[] exposedTools = isFullExposureMode() ? availableTools : routeToolsForCurrentStep();
+        // ===== 熔断过滤（两种模式共用）:排除已被熔断的工具 =====
+        ToolCallback[] routedTools = Arrays.stream(exposedTools)
+                .filter(tool -> !isCircuitBroken(tool.getToolDefinition().name()))
+                .toArray(ToolCallback[]::new);
+        // 如果所有工具都被熔断,放行 doTerminate 让模型能优雅退出
+        if (routedTools.length == 0) {
+            routedTools = Arrays.stream(availableTools)
+                    .filter(tool -> "doTerminate".equals(tool.getToolDefinition().name()))
+                    .toArray(ToolCallback[]::new);
+            log.warn("{} 所有工具已被熔断,仅保留 doTerminate", getName());
+        }
+        String toolNames = Arrays.stream(routedTools)
+                .map(tool -> tool.getToolDefinition().name())
+                .collect(Collectors.joining(", "));
+        log.info("{} 本轮暴露工具(熔断过滤后):{}", getName(), toolNames);
+        if (!isFullExposureMode()) {
+            // 路由选择性观测：暴露数/总数，用于监控路由是否退化回"接近全量暴露"
+            int totalTools = availableTools.length;
+            log.info("{} 本轮工具路由选择性: {}/{} ({}%)", getName(), routedTools.length, totalTools,
+                    totalTools > 0 ? routedTools.length * 100 / totalTools : 0);
+        }
+        return routedTools;
+    }
+
+    /**
+     * 动态调用机制的工具选择：暴露集合 = L1 元工具 ∪ 可配置固定工具 ∪ L2 会话发现工具 ∪ 本轮路由结果。
+     * 默认（full 模式）不走到这里，仅 exposure-mode=dynamic 时启用，源码保留为教学素材。
+     */
+    private ToolCallback[] routeToolsForCurrentStep() {
         String routingContext = buildRoutingContext();
         Set<String> selectedToolNames = resolveSelectedToolNames(routingContext);
-        // 工具动态调用机制：暴露集合 = L1 元工具 ∪ L1 可配置固定工具 ∪ L2 会话发现工具 ∪ 本轮路由结果
         selectedToolNames.addAll(META_TOOL_NAMES);
         selectedToolNames.addAll(toolRoutingProperties.getFixedTools());
         selectedToolNames.addAll(sessionDiscoveredTools);
@@ -618,25 +674,6 @@ public class ToolCallAgent extends ReActAgent {
             log.info("{} 路由结果与可用工具完全不匹配,回退到全量工具", getName());
             routedTools = availableTools;
         }
-        // ===== 熔断过滤:排除已被熔断的工具 =====
-        routedTools = Arrays.stream(routedTools)
-                .filter(tool -> !isCircuitBroken(tool.getToolDefinition().name()))
-                .toArray(ToolCallback[]::new);
-        // 如果所有工具都被熔断,放行 doTerminate 让模型能优雅退出
-        if (routedTools.length == 0) {
-            routedTools = Arrays.stream(availableTools)
-                    .filter(tool -> "doTerminate".equals(tool.getToolDefinition().name()))
-                    .toArray(ToolCallback[]::new);
-            log.warn("{} 所有工具已被熔断,仅保留 doTerminate", getName());
-        }
-        String toolNames = Arrays.stream(routedTools)
-                .map(tool -> tool.getToolDefinition().name())
-                .collect(Collectors.joining(", "));
-        log.info("{} 本轮工具路由结果(熔断过滤后):{}", getName(), toolNames);
-        // 路由选择性观测：暴露数/总数，用于监控路由是否退化回"接近全量暴露"
-        int totalTools = availableTools.length;
-        log.info("{} 本轮工具路由选择性: {}/{} ({}%)", getName(), routedTools.length, totalTools,
-                totalTools > 0 ? routedTools.length * 100 / totalTools : 0);
         return routedTools;
     }
 

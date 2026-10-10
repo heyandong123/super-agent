@@ -111,11 +111,16 @@ public class PDFGenerationTool {
         return PdfFontFactory.createFont("STSongStd-Light", "UniGB-UCS2-H");
     }
 
-    @Tool(description = "Generate a PDF file with given content", returnDirect = false)
+    // 重构轮（2026-10）：描述写明输出位置、中文支持与"连续段落"这一排版限制
+    @Tool(description = """
+            Generate a PDF file from text content, saved under the sandbox directory tmp/pdf/, and return
+            the saved file path. Chinese text is supported. The whole content is rendered as one continuous
+            paragraph — keep content concise and well-structured.
+            """, returnDirect = false)
     public String generatePDF(
             // TODO 2: 描述参数 fileName 和 content
-            @ToolParam(description = "Name of the file to save the generated PDF") String fileName,
-            @ToolParam(description = "Content to be included in the PDF") String content) {
+            @ToolParam(description = "Name of the PDF file to save (e.g. report.pdf)") String fileName,
+            @ToolParam(description = "Text content to render into the PDF") String content) {
         String fileDir = FileConstant.FILE_SAVE_DIR + "/pdf";
         // 绝对路径按原样使用，相对路径拼接沙箱目录（见 ToolPathUtils）
         String filePath = ToolPathUtils.resolveFilePath(fileDir, fileName);

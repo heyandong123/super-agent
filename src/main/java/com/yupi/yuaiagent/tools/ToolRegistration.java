@@ -13,9 +13,10 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class ToolRegistration {
 
-    // 空默认值：未配置 key 时仅使用免费引擎（百度 → Bing）
-    @Value("${search-api.api-key:}")
-    private String searchApiKey;
+    // 密钥集中管理：真值只写 application-local.yml 的 yuai.api-keys.tavily（未跟踪 + 已忽略）
+    // 空默认值：未配置 key 时跳过 Tavily 主链路，仅使用免费引擎兜底（百度 → Bing）
+    @Value("${yuai.api-keys.tavily:}")
+    private String tavilyApiKey;
 
 //    @Bean
 //    public FileOperationTool fileOperationTool() {
@@ -26,7 +27,7 @@ public class ToolRegistration {
 
     @Bean
     public WebSearchTool webSearchTool() {
-        return new WebSearchTool(searchApiKey);
+        return new WebSearchTool(tavilyApiKey);
     }
 
     @Bean
