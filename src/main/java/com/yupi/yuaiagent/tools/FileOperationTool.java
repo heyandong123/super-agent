@@ -48,11 +48,18 @@ import cn.hutool.core.io.FileUtil;
 import com.yupi.yuaiagent.constant.FileConstant;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.stereotype.Component;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 /**
  * 文件操作工具类（为大模型提供读写本地文件的“物理外挂”）
  */
+@Component
 public class FileOperationTool {
-    // 划定一个安全沙箱目录，防止大模型“越权”乱写文件破坏系统
+    // 划定一个安全沙箱目录，防止大模型“越权”乱写文件破坏系统。
+    // 相对路径写入沙箱目录；绝对路径（如 /tmp/xxx）按原样使用，见 ToolPathUtils。
     private final String FILE_DIR = FileConstant.FILE_SAVE_DIR + "/file";
     // TODO 1: 标记这是一个可以被大模型调用的工具，并准确描述它的功能
     // 核心原理：大模型看不懂 Java 代码，它只看这里的 description。框架会在底层把这段描述转成 JSON Schema 发给大模型。
@@ -62,7 +69,7 @@ public class FileOperationTool {
             // TODO 2: 标记并描述方法的参数
             // 提示：加上 @ToolParam 注解，设置 description = "Name of a file to read"
             @ToolParam(description = "Name of a file to read") String fileName) {
-        String filePath = FILE_DIR + "/" + fileName;
+        String filePath = ToolPathUtils.resolveFilePath(FILE_DIR, fileName);
         try {
             // TODO 3: 执行本地文件读取
             // 核心原理：Hutool 是 Java 生态里极其好用的工具包，极大地简化了原生 I/O 流的复杂操作。
@@ -83,11 +90,13 @@ public class FileOperationTool {
             // TODO 6: 标记文件内容参数 (description: "Content to write to the file")
             @ToolParam(description = "Content to write to the file")
             String content) {
-        String filePath = FILE_DIR + "/" + fileName;
+        String filePath = ToolPathUtils.resolveFilePath(FILE_DIR, fileName);
         try {
-            // TODO 7: 确保多级目录存在，防止报错
-            // 提示：调用 FileUtil.mkdir(FILE_DIR)
-            FileUtil.mkdir(FILE_DIR);
+            // TODO 7: 确保目标文件的多级目录存在，防止报错
+            Path parent = Paths.get(filePath).getParent();
+            if (parent != null) {
+                FileUtil.mkdir(parent.toString());
+            }
             // TODO 8: 将字符串内容写入文件
             // 提示：调用 FileUtil.writeUtf8String(content, filePath)
             FileUtil.writeUtf8String(content,filePath);

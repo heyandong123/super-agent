@@ -8,7 +8,7 @@ class WebScrapingToolTest {
     @Test
     void scrapeWebPage() {
         WebScrapingTool webScrapingTool = new WebScrapingTool();
-        String url = "https://www.codefather.cn";
+        String url = "https://www.example.com";
         String result = webScrapingTool.scrapeWebPage(url);
         Assertions.assertNotNull(result);
     }
