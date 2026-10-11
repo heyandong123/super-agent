@@ -112,6 +112,9 @@
 - `LayeredMemoryEvaluationTest`：改新签名（userId 传 `"default"`，与生产 `recordLoveAppInteraction` 的落库键一致）；**附带修掉 `memoryFile()` 少一层 `{userId}` 目录**导致 `@AfterEach` 从来没删掉过文件的问题；
 - `MemoryUpdateServiceTest`：改 4 参签名 + `RUN_MEMORY_EVAL` 门控 + 唯一 conversationId。
 
+> 注（2026-10-11）：上面两条里的 `userId="default"` / "唯一 conversationId" 是**当时的契约**，后续「单用户单会话收敛轮」把键参数整体删掉了
+> （现在靠 `@DynamicPropertySource` 换 `yuai.memory.dir` 做隔离，见 docs/context-memory-refactor.md §9）。此处保留原文以如实记录当轮做法。
+
 **验证**：`./mvnw -q test-compile` 由 **BUILD FAILURE → BUILD SUCCESS**；`-Dtest=ToolSelectionAccuracyTest` 由"跑不了" → `Tests run: 1, Skipped: 1`（0.002s，确认门控生效）。
 
 ### 批次 3：三个独立 bug ✅
@@ -209,3 +212,16 @@ git status --short | grep -c 'application-local.yml'   # 期望：0
 - **为什么 `CompletableFuture` 要换掉？** 它拿不到可中断的句柄：`cancel(true)` 对已经开始执行的 lambda 不产生中断。连接断开后 agent 会继续烧 LLM 额度、继续产生文件副作用。换成显式线程池 + `Future` 后 `cancel(true)` 才真的能打断。
 - **为什么心跳用注释帧？** 它走 SSE 协议但**不触发前端任何事件**（既不是 `message` 也不是具名事件），所以能在不改前端契约、不污染会话内容的前提下保活。
 - **为什么给测试打 `@Tag("unit")`？** 这个仓库里 `./mvnw test` 是个陷阱（真实 LLM + PG）。用标签划出"能离线跑的可信子集"，让 `-Dgroups=unit` 成为可复制的 CI 命令。
+
+---
+
+## 8. 后续轮次索引（本文件只记录第一轮）
+
+| 轮次 | 文档 | 一句话 | 关键数字 |
+| --- | --- | --- | --- |
+| 工具重构轮（2026-10-10） | `docs/tool-refactor-plan.md` | 工具暴露改全量加载（对标 Claude Code/OpenHands 的固定工具面）+ 描述重写 + 护栏 | 常驻 9 工具 5860 字符 ≈ 1465 token/次调用；离线 113 例全绿 |
+| 上下文/记忆重构轮（2026-10-10，阶段 0~4） | `docs/context-memory-refactor.md` §1~§8 | 四层漏斗（入口截断/常驻做小/运行层两级压缩/退出落盘）+ 记忆写入异步化 | 超长归档 143~146s → 0.78s；A/B 六轮判定**未达标**，`context.mode` 默认仍为 legacy |
+| 单用户单会话收敛轮（2026-10-11） | `docs/context-memory-refactor.md` §9 | 删掉全部记忆寻址键、工件收敛三件、新增近场历史恢复（`history.jsonl`） | 离线 **127 例全绿**；记忆评测 6 例全绿；工件不再随会话数增长 |
+| 流式轮（2026-10-11） | `docs/streaming-refactor.md` | 整步伪流式 → 逐 token 真流式（新增 `delta` 事件，think 叙述 + 最终答案逐字上屏，工具仍是离散步骤行） | 两轮 A/B 首字 **4305→937ms（−78%）/ 4096→826ms（−80%）**；离线 **142 例全绿**；回滚开关实测零 delta 帧 |
+
+> 四轮改动**均已完成但未提交**（等指令）；每轮的验证命令都在各自文档里，提交前照抄即可。

@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yupi.yuaiagent.advisor.MyLoggerAdvisor;
+import com.yupi.yuaiagent.context.ContextWindowManager;
 import com.yupi.yuaiagent.agent.model.AgentState;
 import com.yupi.yuaiagent.agent.model.MultiAgentPlan;
 import com.yupi.yuaiagent.agent.model.SubAgentType;
@@ -12,9 +13,11 @@ import com.yupi.yuaiagent.agent.model.SubTaskResult;
 import com.yupi.yuaiagent.memory.ConversationMemoryService;
 import com.yupi.yuaiagent.memory.MemoryAssembler;
 import com.yupi.yuaiagent.memory.MemoryUpdateService;
+import com.yupi.yuaiagent.stream.StreamingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolRoutingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolVectorRouter;
 import lombok.extern.slf4j.Slf4j;
+import com.yupi.yuaiagent.metrics.UsageMetricsAdvisor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
@@ -67,6 +70,8 @@ public class YuManusMultiAgent extends BaseAgent {
 
     private final ConversationMemoryService conversationMemoryService;
 
+    private final ContextWindowManager contextWindowManager;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final List<SubTaskRequest> taskQueue = new ArrayList<>();
@@ -85,7 +90,12 @@ public class YuManusMultiAgent extends BaseAgent {
                              MemoryUpdateService memoryUpdateService,
                              ToolVectorRouter toolVectorRouter,
                              ToolRoutingProperties toolRoutingProperties,
-                             ConversationMemoryService conversationMemoryService) {
+                             ConversationMemoryService conversationMemoryService,
+                             ContextWindowManager contextWindowManager,
+                             StreamingProperties streamingProperties) {
+        // 流式配置上抛给 BaseAgent（2026-10 流式轮）：协调器自己不碰工具，
+        // 唯一会流式的是 BaseAgent.synthesizeFinalAnswer 合成的最终答案
+        super(streamingProperties);
         this.allTools = allTools;
         this.searchTools = searchTools;
         this.documentTools = documentTools;
@@ -95,6 +105,7 @@ public class YuManusMultiAgent extends BaseAgent {
         this.toolVectorRouter = toolVectorRouter;
         this.toolRoutingProperties = toolRoutingProperties;
         this.conversationMemoryService = conversationMemoryService;
+        this.contextWindowManager = contextWindowManager;
         this.setName("yuManusMultiAgent");
         this.setMemoryAssembler(memoryAssembler);
         this.setMemoryUpdateService(memoryUpdateService);
@@ -105,7 +116,7 @@ public class YuManusMultiAgent extends BaseAgent {
                 """);
         this.setMaxSteps(8);
         ChatClient chatClient = ChatClient.builder(dashscopeChatModel)
-                .defaultAdvisors(new MyLoggerAdvisor())
+                .defaultAdvisors(new MyLoggerAdvisor(), new UsageMetricsAdvisor(this::getRunMetrics))
                 .build();
         this.setChatClient(chatClient);
     }
@@ -264,29 +275,36 @@ public class YuManusMultiAgent extends BaseAgent {
         String rawOutput;
         try {
             String childConversationId = resolveConversationId() + ":" + subTaskRequest.getAgentType().name().toLowerCase(Locale.ROOT);
+            // 子 Agent 一律关闭记忆（memoryWriteEnabled=false）：2026-10-11 单键化后，
+            // ① 写——父协调器已用「用户的原始话语」写过画像/摘要/归档，子 Agent 手里是被包装过的
+            //    子任务指令，照写会污染唯一那份工件（不再有"子会话文件"可供隔离）；
+            // ② 恢复——子任务不该背上父会话的历史前缀。
             rawOutput = switch (subTaskRequest.getAgentType()) {
                 case SEARCH -> {
                     SearchAgent searchAgent = new SearchAgent(
                             searchTools, dashscopeChatModel, memoryAssembler, memoryUpdateService,
-                            toolVectorRouter, toolRoutingProperties, conversationMemoryService);
+                            toolVectorRouter, toolRoutingProperties, conversationMemoryService, contextWindowManager,
+                            getStreamingProperties());
                     searchAgent.setConversationId(childConversationId);
-                    searchAgent.setUserId(getUserId());
+                    searchAgent.setMemoryWriteEnabled(false);
                     yield searchAgent.run(subTaskPrompt);
                 }
                 case DOCUMENT -> {
                     DocumentAgent documentAgent = new DocumentAgent(
                             documentTools, dashscopeChatModel, memoryAssembler, memoryUpdateService,
-                            toolVectorRouter, toolRoutingProperties, conversationMemoryService);
+                            toolVectorRouter, toolRoutingProperties, conversationMemoryService, contextWindowManager,
+                            getStreamingProperties());
                     documentAgent.setConversationId(childConversationId);
-                    documentAgent.setUserId(getUserId());
+                    documentAgent.setMemoryWriteEnabled(false);
                     yield documentAgent.run(subTaskPrompt);
                 }
                 case GENERAL -> {
                     YuManus yuManus = new YuManus(
                             allTools, dashscopeChatModel, memoryAssembler, memoryUpdateService,
-                            toolVectorRouter, toolRoutingProperties, conversationMemoryService);
+                            toolVectorRouter, toolRoutingProperties, conversationMemoryService, contextWindowManager,
+                            getStreamingProperties());
                     yuManus.setConversationId(childConversationId);
-                    yuManus.setUserId(getUserId());
+                    yuManus.setMemoryWriteEnabled(false);
                     yield yuManus.run(subTaskPrompt);
                 }
             };
@@ -511,14 +529,24 @@ public class YuManusMultiAgent extends BaseAgent {
         return "地图工具已返回候选约会地点：\n" + String.join("\n", poiLines);
     }
 
+    /**
+     * 原始用户目标 = 本轮 run 入口记录的 currentUserPrompt（2026-10-11）。
+     * <p>
+     * 旧实现取消息列表第一条：实际上第一条永远是记忆 SystemMessage，于是恒走"join 全部消息"
+     * 分支——把整块记忆文本当成了用户目标（规划输入被污染）。恢复历史注入后，扫描类实现
+     * 还会把上一次会话的历史轮次当成目标，所以统一改读 currentUserPrompt。
+     */
     private String getOriginalUserGoal() {
-        Message firstMessage = CollUtil.getFirst(getMessageList());
-        if (firstMessage instanceof UserMessage) {
-            return firstMessage.getText();
+        String prompt = getCurrentUserPrompt();
+        if (StrUtil.isNotBlank(prompt)) {
+            return prompt;
         }
+        // 兜底：理论上 run()/runStream() 入口必赋值；未赋值（极端路径）时取最后一条 UserMessage
         return getMessageList().stream()
+                .filter(message -> message instanceof UserMessage)
                 .map(Message::getText)
-                .collect(Collectors.joining("\n"));
+                .reduce((first, second) -> second)
+                .orElse("");
     }
 
     private String extractJson(String rawText) {

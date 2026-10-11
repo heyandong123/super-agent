@@ -47,6 +47,15 @@ public class LoveApp {
             "引导用户详述事情经过、对方反应及自身想法，以便给出专属解决方案。";
 
     /**
+     * 单会话固定 key（2026-10-11 单用户单会话重构）。
+     * <p>
+     * Kryo 窗口记忆原先按 {@code {chatId}_memory.bin} 分文件存——「所有会话视为一条连续会话」后，
+     * 窗口固定挂在同一个 key 上（{@code tmp/chat-memory/single_memory.bin}）。
+     * 对外方法签名里的 chatId 参数保留但不再用于记忆寻址（前端兼容 + 日志追踪）。
+     */
+    private static final String SINGLE_CONVERSATION_KEY = "single";
+
+    /**
      * 初始化 ChatClient
      *
      * @param dashscopeChatModel
@@ -82,9 +91,9 @@ public class LoveApp {
      * @return
      */
     public String doChat(String message, String chatId) {
-        String conversationId = normalizeConversationId(chatId);
+        String conversationId = SINGLE_CONVERSATION_KEY;
         String runtimeSystemPrompt = appendConversationMemory(
-                buildRuntimeSystemPrompt(conversationId, "love_app", "chat"), conversationId, message);
+                buildRuntimeSystemPrompt("love_app", "chat"), message);
         ChatResponse chatResponse = chatClient
                 .prompt()
                 .system(runtimeSystemPrompt)
@@ -93,7 +102,7 @@ public class LoveApp {
                 .call()
                 .chatResponse();
         String content = chatResponse.getResult().getOutput().getText();
-        memoryUpdateService.recordLoveAppInteraction(conversationId, null, message, content, "chat");
+        memoryUpdateService.recordLoveAppInteraction(null, message, content, "chat");
         log.info("content: {}", content);
         return content;
     }
@@ -117,13 +126,13 @@ public class LoveApp {
      *                后经 RAG Advisor 检索知识库，把命中文档作为参考资料注入上下文）
      */
     public Flux<String> doChatByStream(String message, String chatId, boolean useRag) {
-        String conversationId = normalizeConversationId(chatId);
+        String conversationId = SINGLE_CONVERSATION_KEY;
         String runtimeSystemPrompt = appendConversationMemory(
-                buildRuntimeSystemPrompt(conversationId, "love_app", "stream_chat"), conversationId, message);
+                buildRuntimeSystemPrompt("love_app", "stream_chat"), message);
         StringBuilder assistantOutput = new StringBuilder();
         // 多轮指代消解：RAG 场景先重写查询词（"那它怎么用？"→完整意图），再交给 RAG Advisor 检索
         String effectiveMessage = useRag
-                ? queryRewriter.doQueryRewrite(message, getConversationHistory(conversationId))
+                ? queryRewriter.doQueryRewrite(message, getConversationHistory())
                 : message;
         var promptSpec = chatClient
                 .prompt()
@@ -142,7 +151,6 @@ public class LoveApp {
                 .content()
                 .doOnNext(assistantOutput::append)
                 .doOnComplete(() -> memoryUpdateService.recordLoveAppInteraction(
-                        conversationId,
                         null,  // relationshipStatus 只放真实状态；传 null 让模型从消息中抽取（曾误传 "stream_rag" 导致画像永远为空）
                         message,
                         assistantOutput.toString(),
@@ -162,8 +170,8 @@ public class LoveApp {
      * @return
      */
     public LoveReport doChatWithReport(String message, String chatId) {
-        String conversationId = normalizeConversationId(chatId);
-        String runtimeSystemPrompt = buildRuntimeSystemPrompt(conversationId, "love_app", "report")
+        String conversationId = SINGLE_CONVERSATION_KEY;
+        String runtimeSystemPrompt = buildRuntimeSystemPrompt("love_app", "report")
                 + "\n\n每次对话后都要生成恋爱结果，标题为{用户名}的恋爱报告，内容为建议列表";
         LoveReport loveReport = chatClient
                 .prompt()
@@ -173,7 +181,7 @@ public class LoveApp {
                 .advisors(spec -> spec.param(ChatMemory.CONVERSATION_ID, conversationId))
                 .call()
                 .entity(LoveReport.class);
-        memoryUpdateService.recordLoveAppInteraction(conversationId, null, message, String.valueOf(loveReport), "report");
+        memoryUpdateService.recordLoveAppInteraction(null, message, String.valueOf(loveReport), "report");
         log.info("loveReport: {}", loveReport);
         return loveReport;
     }
@@ -201,7 +209,7 @@ public class LoveApp {
      * @return 最终大模型回复的字符串
      */
     public String doChatWithRag(String message, String chatId,String status) {
-        String conversationId = normalizeConversationId(chatId);
+        String conversationId = SINGLE_CONVERSATION_KEY;
         // =========================================================================
         // TODO 1: 查询重写 (Query Rewrite)
         // 核心原理：用户在多轮对话中的提问往往是指代不清的（例如：“那它具体怎么用？”）。
@@ -210,8 +218,8 @@ public class LoveApp {
         // 提示：调用 queryRewriter 的 doQueryRewrite 方法处理 message。
         // =========================================================================
         String rewrittenMessage = queryRewriter.doQueryRewrite(message,
-                getConversationHistory(conversationId));
-        String runtimeSystemPrompt = buildRuntimeSystemPrompt(conversationId, "love_app", "rag");
+                getConversationHistory());
+        String runtimeSystemPrompt = buildRuntimeSystemPrompt("love_app", "rag");
         // =========================================================================
         // TODO 2: 链式调用 ChatClient 构建对话请求流水线
         // 核心原理：ChatClient 使用了流畅的 Builder 设计模式（链式调用）。
@@ -259,7 +267,7 @@ public class LoveApp {
         // =========================================================================
         String content = chatResponse.getResult().getOutput().getText(); // 请替换为实际的提取代码
 
-        memoryUpdateService.recordLoveAppInteraction(conversationId, status, message, content, "rag");
+        memoryUpdateService.recordLoveAppInteraction(status, message, content, "rag");
         log.info("最终回复内容: {}", content);
         return content;
     }
@@ -277,8 +285,8 @@ public class LoveApp {
      * @return
      */
     public String doChatWithTools(String message, String chatId) {
-        String conversationId = normalizeConversationId(chatId);
-        String runtimeSystemPrompt = buildRuntimeSystemPrompt(conversationId, "love_app", "tool_chat");
+        String conversationId = SINGLE_CONVERSATION_KEY;
+        String runtimeSystemPrompt = buildRuntimeSystemPrompt("love_app", "tool_chat");
         ChatResponse chatResponse = chatClient
                 .prompt()
                 .system(runtimeSystemPrompt)
@@ -290,7 +298,7 @@ public class LoveApp {
                 .call()
                 .chatResponse();
         String content = chatResponse.getResult().getOutput().getText();
-        memoryUpdateService.recordLoveAppInteraction(conversationId, null, message, content, "tool_chat");
+        memoryUpdateService.recordLoveAppInteraction(null, message, content, "tool_chat");
         log.info("content: {}", content);
         return content;
     }
@@ -307,8 +315,8 @@ public class LoveApp {
      * @return
      */
     public String doChatWithMcp(String message, String chatId) {
-        String conversationId = normalizeConversationId(chatId);
-        String runtimeSystemPrompt = buildRuntimeSystemPrompt(conversationId, "love_app", "mcp_chat");
+        String conversationId = SINGLE_CONVERSATION_KEY;
+        String runtimeSystemPrompt = buildRuntimeSystemPrompt("love_app", "mcp_chat");
         ChatResponse chatResponse = chatClient
                 .prompt()
                 .system(runtimeSystemPrompt)
@@ -320,23 +328,26 @@ public class LoveApp {
                 .call()
                 .chatResponse();
         String content = chatResponse.getResult().getOutput().getText();
-        memoryUpdateService.recordLoveAppInteraction(conversationId, null, message, content, "mcp_chat");
+        memoryUpdateService.recordLoveAppInteraction(null, message, content, "mcp_chat");
         log.info("content: {}", content);
         return content;
     }
 
     /**
      * 对话记忆向量检索（规则触发）：
-     * 每轮把用户消息当检索词，从本会话的历史对话全文库里找相关片段拼进 system prompt。
+     * 每轮把用户消息当检索词，从历史对话全文库里找相关片段拼进 system prompt。
      * 画像/摘要提供"稳定事实 + 最近概览"，向量库兜底"具体细节"——摘要压缩会丢信息，
      * 检索全文虽然不能保证 100% 召回，但为"很久以前说过的事"提供了完整的第二通道。
      * 检索失败静默降级，不影响主链路（fail-open）。
+     * <p>
+     * 2026-10-11 单用户单会话：检索不再带任何键（agent 链路与本链路共享同一个库、
+     * 互相可见是单会话语义下的正确行为）。
      */
-    private String appendConversationMemory(String systemPrompt, String conversationId, String message) {
+    private String appendConversationMemory(String systemPrompt, String message) {
         if (conversationMemoryService == null) {
             return systemPrompt;
         }
-        String memory = conversationMemoryService.retrieveMemory(conversationId, message);
+        String memory = conversationMemoryService.retrieveMemory(message);
         if (StrUtil.isBlank(memory)) {
             return systemPrompt;
         }
@@ -346,16 +357,14 @@ public class LoveApp {
 
     /**
      * 构建运行时系统提示词
-     * 根据会话ID、模式和请求类型，组装记忆上下文并拼接到基础系统提示词中
+     * 根据模式和请求类型，组装记忆上下文（单用户单会话：画像/摘要各全局一份）并拼接到基础系统提示词中
      *
-     * @param conversationId 会话ID
-     * @param mode           模式（如 love_app）
-     * @param requestType    请求类型（如 chat, stream_chat, report, rag 等）
+     * @param mode        模式（如 love_app）
+     * @param requestType 请求类型（如 chat, stream_chat, report, rag 等）
      * @return 完整的系统提示词字符串
      */
-    private String buildRuntimeSystemPrompt(String conversationId, String mode, String requestType) {
-        // 恋爱大师链路无用户体系，统一归入 "default" 用户
-        MemoryContext memoryContext = memoryAssembler.assemble("default", conversationId, mode, requestType);
+    private String buildRuntimeSystemPrompt(String mode, String requestType) {
+        MemoryContext memoryContext = memoryAssembler.assemble(mode, requestType);
         String memoryPrompt = memoryContext.toPromptSection();
         if (StrUtil.isBlank(memoryPrompt)) {
             return SYSTEM_PROMPT;
@@ -364,11 +373,12 @@ public class LoveApp {
     }
 
     /**
-     * 从对话记忆中提取最近几轮对话历史，供 QueryRewriter 理解上下文。
+     * 从对话窗口记忆中提取最近几轮对话历史，供 QueryRewriter 理解上下文。
+     * 窗口固定在 {@link #SINGLE_CONVERSATION_KEY} 上（单会话）。
      */
-    private String getConversationHistory(String conversationId) {
+    private String getConversationHistory() {
         List<org.springframework.ai.chat.messages.Message> messages =
-                chatMemory.get(conversationId);
+                chatMemory.get(SINGLE_CONVERSATION_KEY);
         if (messages == null || messages.isEmpty()) {
             return "";
         }
@@ -379,10 +389,5 @@ public class LoveApp {
                           || m.getMessageType() == org.springframework.ai.chat.messages.MessageType.ASSISTANT)
                 .map(m -> m.getMessageType().name() + ": " + m.getText())
                 .collect(Collectors.joining("\n"));
-    }
-
-    private String normalizeConversationId(String chatId) {
-        return StrUtil.blankToDefault(chatId, "anonymous-loveapp")
-                .replaceAll("[^a-zA-Z0-9._-]", "_");
     }
 }

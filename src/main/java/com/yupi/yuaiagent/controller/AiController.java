@@ -1,5 +1,6 @@
 package com.yupi.yuaiagent.controller;
 
+import com.yupi.yuaiagent.context.ContextWindowManager;
 import com.yupi.yuaiagent.agent.YuManus;
 import com.yupi.yuaiagent.agent.YuManusMultiAgent;
 import lombok.extern.slf4j.Slf4j;
@@ -8,6 +9,7 @@ import com.yupi.yuaiagent.app.LoveApp;
 import com.yupi.yuaiagent.memory.ConversationMemoryService;
 import com.yupi.yuaiagent.memory.MemoryAssembler;
 import com.yupi.yuaiagent.memory.MemoryUpdateService;
+import com.yupi.yuaiagent.stream.StreamingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolRoutingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolVectorRouter;
 import jakarta.annotation.Resource;
@@ -64,6 +66,13 @@ public class AiController {
 
     @Resource
     private ToolRoutingProperties toolRoutingProperties;
+
+    @Resource
+    private ContextWindowManager contextWindowManager;
+
+    /** 流式配置（2026-10 流式轮）：与其它依赖一样用 @Resource 取，再手动 new Agent 时沿构造器传入 */
+    @Resource
+    private StreamingProperties streamingProperties;
 
     @Resource
     private ApplicationContext applicationContext;
@@ -140,18 +149,17 @@ public class AiController {
      * 流式调用 Manus 超级智能体
      *
      * @param message 用户消息
-     * @param chatId  会话 ID（可为空：服务端生成并通过 session 事件回传，前端存 localStorage 复用）
-     * @param userId  用户标识（可为空：默认 "default"）。与 chatId 组成记忆复合键
+     * @param chatId  会话 ID（可为空：服务端生成并通过 session 事件回传，前端存 localStorage 复用。
+     *                2026-10-11 单会话收敛后，它只用于日志追踪，不再参与记忆寻址）
      * @return
      */
     @GetMapping("/manus/chat")
-    public SseEmitter doChatWithManus(String message, String chatId,
-                                      @RequestParam(value = "userId", required = false) String userId) {
+    public SseEmitter doChatWithManus(String message, String chatId) {
         YuManus yuManus = new YuManus(
                 mergeTools(allTools, mcpTools()), chatModel, memoryAssembler, memoryUpdateService,
-                toolVectorRouter, toolRoutingProperties, conversationMemoryService);
+                toolVectorRouter, toolRoutingProperties, conversationMemoryService, contextWindowManager,
+                streamingProperties);
         yuManus.setConversationId(chatId);
-        yuManus.setUserId(userId);
         return yuManus.runStream(message);
     }
 
@@ -160,12 +168,10 @@ public class AiController {
      *
      * @param message 用户消息
      * @param chatId  会话 ID（可为空：服务端生成并通过 session 事件回传）
-     * @param userId  用户标识（可为空：默认 "default"）。与 chatId 组成记忆复合键
      * @return
      */
     @GetMapping("/manus/multi_agent/chat")
-    public SseEmitter doChatWithMultiAgentManus(String message, String chatId,
-                                                @RequestParam(value = "userId", required = false) String userId) {
+    public SseEmitter doChatWithMultiAgentManus(String message, String chatId) {
         ToolCallback[] mcpTools = mcpTools();
         YuManusMultiAgent yuManusMultiAgent = new YuManusMultiAgent(
                 mergeTools(allTools, mcpTools),
@@ -176,10 +182,11 @@ public class AiController {
                 memoryUpdateService,
                 toolVectorRouter,
                 toolRoutingProperties,
-                conversationMemoryService
+                conversationMemoryService,
+                contextWindowManager,
+                streamingProperties
         );
         yuManusMultiAgent.setConversationId(chatId);
-        yuManusMultiAgent.setUserId(userId);
         return yuManusMultiAgent.runStream(message);
     }
 

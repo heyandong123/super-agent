@@ -1,12 +1,15 @@
 package com.yupi.yuaiagent.agent;
 
 import com.yupi.yuaiagent.advisor.MyLoggerAdvisor;
+import com.yupi.yuaiagent.context.ContextWindowManager;
 import com.yupi.yuaiagent.memory.ConversationMemoryService;
 import com.yupi.yuaiagent.memory.MemoryAssembler;
 import com.yupi.yuaiagent.memory.MemoryUpdateService;
+import com.yupi.yuaiagent.stream.StreamingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolRoutingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolVectorRouter;
 import org.springframework.beans.factory.annotation.Qualifier;
+import com.yupi.yuaiagent.metrics.UsageMetricsAdvisor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
@@ -24,8 +27,11 @@ public class YuManus extends ToolCallAgent {
                    MemoryUpdateService memoryUpdateService,
                    ToolVectorRouter toolVectorRouter,
                    ToolRoutingProperties toolRoutingProperties,
-                   ConversationMemoryService conversationMemoryService) {
-        super(allTools, toolVectorRouter, toolRoutingProperties, conversationMemoryService);
+                   ConversationMemoryService conversationMemoryService,
+                   ContextWindowManager contextWindowManager,
+                   StreamingProperties streamingProperties) {
+        super(allTools, toolVectorRouter, toolRoutingProperties, conversationMemoryService, contextWindowManager,
+                streamingProperties);
         this.setName("yuManus");
         this.setMemoryAssembler(memoryAssembler);
         this.setMemoryUpdateService(memoryUpdateService);
@@ -58,7 +64,7 @@ public class YuManus extends ToolCallAgent {
         this.setMaxSteps(20);
         // 初始化 AI 对话客户端
         ChatClient chatClient = ChatClient.builder(dashscopeChatModel)
-                .defaultAdvisors(new MyLoggerAdvisor())
+                .defaultAdvisors(new MyLoggerAdvisor(), new UsageMetricsAdvisor(this::getRunMetrics))
                 .build();
         this.setChatClient(chatClient);
     }

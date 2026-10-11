@@ -43,7 +43,7 @@ class ToolSchemaBudgetTest {
                 new TerminalOperationTool(),             // executeTerminalCommand
                 new PDFGenerationTool(),                 // generatePDF
                 new TerminateTool(),                     // doTerminate
-                new SearchMemoryTool(null, () -> "probe") // searchMemory
+                new SearchMemoryTool(null)               // searchMemory（单用户单会话：构造 1 参）
         );
         // 元工具：动态路由机制的一部分，构造参数只影响执行、不影响 schema 生成
         ToolSearchTool toolSearchTool = new ToolSearchTool(

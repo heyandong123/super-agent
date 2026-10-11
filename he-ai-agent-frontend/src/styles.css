@@ -182,6 +182,23 @@ body {
   margin-top: 8px;
 }
 
+/* 流式打字光标（2026-10 流式轮）：跟随逐 token 增量闪烁，收到 final 事件后消失 */
+.stream-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--primary);
+  animation: stream-cursor-blink 1s steps(2, start) infinite;
+}
+
+@keyframes stream-cursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
 .chat-input {
   display: flex;
   gap: 10px;

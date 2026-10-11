@@ -3,7 +3,20 @@ spring:
     name: yu-ai-agent
   profiles:
     active: local
+  # 排除 DashScope 图像模型自动配置：本项目不使用 ImageModel（全仓无注入），
+  # 但它的构造器会无条件改写**共享的** RetryTemplate——改成 SimpleRetryPolicy(10) + 固定退避 15s。
+  # 后果：任何 400（确定性错误、重试毫无意义）也要重试 10 次，一次约 146 秒。
+  # 已实测复现：超长记忆归档被 DashScope 以 400 拒绝后，请求线程被占用 143~146 秒才 fail-open。
+  autoconfigure:
+    exclude: com.alibaba.cloud.ai.autoconfigure.dashscope.DashScopeImageAutoConfiguration
   ai:
+    # 重试策略收敛：只对真正的瞬时错误重试，3 次封顶（默认 10 次 × 固定退避对确定性 400 是灾难）
+    retry:
+      max-attempts: 3
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 5s
     openai:
       base-url: https://api.deepseek.com
       chat:
@@ -62,6 +75,58 @@ yuai:
     search-top-k: 3
     relaxed-threshold-factor: 0.5
     list-page-size: 10
+  context:
+    # 上下文管理（2026-10 重构 · 阶段 2，对标 Claude Code 的运行层两级压缩）
+    # legacy（默认，旧行为：消息数 >15 就压缩）| budget（token 预算：先清旧工具输出，不够再 LLM 摘要）
+    # 回滚 = 改回 legacy；临时试跑可用命令行覆盖：--yuai.context.mode=budget
+    mode: legacy
+    window-tokens: 32768              # 模型可用上下文（决策按它的比例算，不是按消息条数）
+    static-overhead-tokens: 2200      # 常驻开销：system prompt + nextStepPrompt + 记忆注入 + 工具 schema（实测 1465）
+    microcompact-trigger-ratio: 0.35  # 一级：清旧工具输出（零 LLM 成本，模型需要时可重取）
+    compact-trigger-ratio: 0.5        # 二级：LLM 摘要（不可逆，动手前先落盘 transcript）
+    microcompact-keep-tool-results: 3        # 保留最近 N 条工具结果（对标 clear_tool_uses 的 keep=3）
+    microcompact-clear-at-least-tokens: 1500 # 一次至少清够这么多才动手（对标 clear_at_least，防小碎步打穿 prompt cache）
+    compact-keep-messages: 6          # 压缩后保留的最近消息数
+    compact-keep-recent-files: 5      # 压缩后重注入的「最近用过的文件」路径上限
+    compact-max-per-run: 3            # 单 run 压缩次数上限（防 thrashing）
+    compact-min-steps-between: 2      # 两次压缩之间至少间隔的步数
+    summary-max-chars: 4000           # 摘要结果硬上限（防「摘要本身又撑爆」）
+    summary-fallback-keep-chars: 4000 # 摘要失败时保留「最近」多少字符（旧实现截最老的，已修）
+    transcript-enabled: true          # 压缩前把完整对话落盘（不可逆操作前先留证据）
+    transcript-dir: tmp/transcripts
+    transcript-keep-per-conversation: 5
+    memory-inject-max-chars: 1200     # 常驻记忆块上限（每轮都在的东西刻意做小）
+  stream:
+    # 流式改造（2026-10 流式轮）：think 叙述与最终答案逐 token 推给前端（新增 SSE delta 事件），
+    # 对标 Claude Code / OpenAI Agents SDK 的「文本增量 + 工具调用离散事件」形态。
+    # 只有 runStream 链路会流式（sink 只在 runStream 安装）：run()/子 Agent/评测自动保持阻塞调用。
+    enabled: true
+    include-usage: true  # 流式请求带 stream_options.include_usage（DeepSeek 支持）；关掉则 token 埋点退化为「缺失计数」
+  memory:
+    # 记忆根目录（2026-10-11 单用户单会话重构）：单用户后收敛为固定三件套
+    #   profile.json   —— 用户画像（全局一份）
+    #   summary.json   —— 全程滚动摘要（全局一份）
+    #   history.jsonl  —— 逐轮对话历史（近场恢复源，append-only）
+    # 可注入是测试隔离的前提：评测/单测把它指到 target/ 下，绝不污染真实数据。
+    dir: ${user.dir}/tmp/memory
+    # 单会话历史日志（2026-10-11）：每次 run 起始恢复最近 N 轮原文，对标 Claude Code --continue
+    history:
+      enabled: true          # false = 不写也不恢复（评测隔离/回滚）
+      restore-turns: 6       # 恢复轮数。6 与 legacy 压缩阈值 15 的算术对齐（2*6+1+1+1=15 恰好不触发），
+                             # 改这个值前先看 MemoryHistoryProperties 的注释与 BaseAgentMemoryRestoreTest
+      max-turns: 200         # 文件容量上限，超出后原子裁剪只留最近 max-turns 轮
+      max-chars-per-message: 1200  # 单条恢复截断：超长回答原样回放会在每步 LLM 调用上重复付费
+    # 记忆写入异步化（2026-10 重构 · 阶段 3）：抽画像 + 写摘要 + 向量归档共 3 次 LLM/嵌入往返，
+    # 实测占用请求线程 3~8 秒，而用户早就拿到答案了 —— 移出关键路径。
+    async:
+      enabled: true                # false = 同步执行（调试/回滚，行为与改造前一致）
+      core-pool-size: 1            # 单工作线程 ⇒ 画像「读-改-写」天然串行，不需要文件锁
+      max-pool-size: 2             # 只有队列积压到 64 才会启用第 2 个线程（ThreadPoolExecutor 的扩容时机）
+      queue-capacity: 64           # 有界队列：满了丢弃并计数，绝不把 3~8 秒的写入压回请求线程
+      keep-alive-seconds: 60
+      drain-timeout-millis: 5000   # 关停时最多等 5 秒排空，等不到只告警（工作线程是 daemon）
+      task-timeout-millis: 60000   # 单条写入超 60 秒：看门狗只计数告警、不中断（中断会留下半写文件）
+      watchdog-interval-millis: 30000
   memory-vector:
     enabled: true
     top-k: 3            # 对话记忆检索 Top-K

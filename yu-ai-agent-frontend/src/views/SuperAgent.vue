@@ -27,6 +27,14 @@
               <div v-if="step.expanded" class="step-content">{{ step.content }}</div>
               <div v-else class="step-preview">{{ step.preview }}</div>
             </div>
+            <!-- 正在逐字流出的思考叙述（2026-10 流式轮）：下一条 process 事件到达时并入上面的步骤列表 -->
+            <div v-if="liveThought" class="process-step live-thought">
+              <div class="step-header">
+                <span class="step-num">·</span>
+                <span class="step-tool">思考中</span>
+              </div>
+              <div class="step-content">{{ liveThought }}<span class="live-cursor">▋</span></div>
+            </div>
           </div>
         </div>
         <ChatRoom
@@ -72,9 +80,10 @@ const messages = ref([])
 const connectionStatus = ref('disconnected')
 let eventSource = null
 
-// 会话持久化：服务端生成的 conversationId + userId 存 sessionStorage。
-// 用 sessionStorage 而非 localStorage：每个标签页独立会话（开两个页面记忆不混淆），
-// 刷新页面会话保留（多轮记忆不丢），关闭标签页则下次开启新会话。
+// 会话持久化：服务端生成的 conversationId 存 sessionStorage。
+// 用 sessionStorage 而非 localStorage：每个标签页独立会话，刷新页面会话保留（多轮记忆不丢），
+// 关闭标签页则下次开启新会话。
+// 单用户单会话重构后不再存 userId：记忆（画像/摘要/历史）全局唯一一份，换会话也接得上。
 const SESSION_STORAGE_KEY = 'yu_ai_agent_session'
 const loadSession = () => {
   try {
@@ -86,14 +95,12 @@ const loadSession = () => {
 }
 const saveSession = () => {
   sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-    chatId: chatId.value,
-    userId: userId.value
+    chatId: chatId.value
   }))
 }
 const savedSession = loadSession()
 // chatId 为空 = 首次会话，请求不带 chatId，由服务端生成 UUID 并通过 session 事件回传
 const chatId = ref(savedSession?.chatId || '')
-const userId = ref(savedSession?.userId || '')
 
 // 添加消息到列表
 const addMessage = (content, isUser, type = '') => {
@@ -109,14 +116,42 @@ const addMessage = (content, isUser, type = '') => {
 const processSteps = ref([])
 const showProcess = ref(true)
 
+// ---- 逐 token 流式渲染（2026-10 流式轮）----
+// 正在流出的思考叙述：process 事件到达即并入步骤列表（保持时间顺序），然后清空
+const liveThought = ref('')
+
+// 最终答案气泡在 messages 里的下标：-1 = 还没有流式气泡。
+// 用下标而不是对象引用：messages 是 ref 数组，push/replace 都走响应式代理
+const finalMessageIndex = ref(-1)
+
+// 把流式思考并入步骤列表：思考是「模型这一轮说了什么」，工具行是「它做了什么」，
+// 两者按发生顺序排列，观感与 Claude Code 的文本流 + 工具行一致
+const flushLiveThought = (step) => {
+  if (!liveThought.value.trim()) {
+    liveThought.value = ''
+    return
+  }
+  processSteps.value.push({
+    step,
+    tool: '思考',
+    preview: liveThought.value.slice(0, 80),
+    content: liveThought.value,
+    expanded: false
+  })
+  liveThought.value = ''
+}
+
 // 发送消息
 const sendMessage = (message) => {
   addMessage(message, true, 'user-question')
   processSteps.value = []
+  liveThought.value = ''
+  finalMessageIndex.value = -1
   connectionStatus.value = 'connecting'
 
-  eventSource = chatWithManus(message, chatId.value, userId.value, {
+  eventSource = chatWithManus(message, chatId.value, {
     onProcess: (data) => {
+      flushLiveThought(data.step)
       processSteps.value.push({
         step: data.step,
         tool: data.tool,
@@ -125,8 +160,28 @@ const sendMessage = (message) => {
         expanded: false
       })
     },
+    onDelta: (data) => {
+      if (!data || !data.text) return
+      if (data.scope === 'final') {
+        // 首个 final 增量新开一条气泡（与思考叙述分开），之后只追加；
+        // 闪烁光标由 ChatRoom 的 typing-indicator 负责（它停在最后一条 AI 消息上）
+        if (finalMessageIndex.value < 0) {
+          addMessage('', false, 'ai-final')
+          finalMessageIndex.value = messages.value.length - 1
+        }
+        messages.value[finalMessageIndex.value].content += data.text
+        return
+      }
+      liveThought.value += data.text
+    },
     onFinal: (data) => {
-      addMessage(data.content, false, 'ai-final')
+      // 终态权威：流式渲染过就整条覆盖（避免与服务端全文有出入），没流过就直落一整条
+      if (finalMessageIndex.value >= 0) {
+        messages.value[finalMessageIndex.value].content = data.content
+      } else {
+        addMessage(data.content, false, 'ai-final')
+      }
+      liveThought.value = ''
       connectionStatus.value = 'disconnected'
       eventSource.close()
     },
@@ -137,7 +192,6 @@ const sendMessage = (message) => {
     onSession: (data) => {
       // 服务端确认会话：首次请求服务端生成 conversationId，之后请求携带复用
       if (data.conversationId) chatId.value = data.conversationId
-      if (data.userId) userId.value = data.userId
       saveSession()
     }
   })
@@ -315,6 +369,16 @@ onBeforeUnmount(() => {
   max-height: 200px;
   overflow-y: auto;
 }
+/* 正在流出的思考叙述（2026-10 流式轮）：不可点开收起，始终展开，带闪烁光标 */
+.live-thought { cursor: default; background: #f7f9ff; }
+.live-thought .step-num { background: #909399; }
+.live-thought .step-content { max-height: 140px; }
+.live-cursor {
+  margin-left: 2px;
+  color: #3f51b5;
+  animation: live-cursor-blink 0.7s infinite;
+}
+@keyframes live-cursor-blink { 50% { opacity: 0; } }
 
 .footer-container {
   margin-top: auto;

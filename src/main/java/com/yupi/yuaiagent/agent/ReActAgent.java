@@ -1,4 +1,6 @@
 package com.yupi.yuaiagent.agent;
+import com.yupi.yuaiagent.stream.StreamDisconnectedException;
+import com.yupi.yuaiagent.stream.StreamingProperties;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +14,15 @@ import lombok.extern.slf4j.Slf4j;
 @Data
 @Slf4j
 public abstract class ReActAgent extends BaseAgent {
+
+    /**
+     * 流式配置沿构造器链透传（2026-10 流式轮，与 ToolVectorRouter/ToolRoutingProperties 同一条纪律）。
+     * 本类自己不消费它——think() 的流式分支在 ToolCallAgent，这里只负责把链条接通。
+     */
+    protected ReActAgent(StreamingProperties streamingProperties) {
+        super(streamingProperties);
+    }
+
     public abstract boolean think();
     public abstract String act();
     @Override
@@ -26,6 +37,11 @@ public abstract class ReActAgent extends BaseAgent {
                 recordStepTools("think");
                 return "思考完成，无需使用工具";
             }
+        } catch (StreamDisconnectedException e) {
+            // 客户端已断（SSE 文本增量发送失败，2026-10 流式轮）：原样上抛给 runStream 的收尾逻辑。
+            // 不能像普通异常那样吞成「步骤执行失败」文案——那会让 runStream 继续走 buildFinalSummary
+            // （又一次 LLM 调用），连接早断了还在烧 token。与改动前「process 发送失败即停」语义对齐。
+            throw e;
         } catch (Exception e) {
             e.printStackTrace();
             return "步骤执行失败：" + e.getMessage();

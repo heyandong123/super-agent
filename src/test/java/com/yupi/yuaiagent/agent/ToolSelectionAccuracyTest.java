@@ -50,6 +50,20 @@ import java.util.regex.Pattern;
 class ToolSelectionAccuracyTest {
 
     /**
+     * 评测隔离（2026-10-11 单用户单会话重构）：记忆全局一份，隔离手段只剩「换根目录」——
+     * 指到 target/ 下本次运行专属目录，绝不污染真实 tmp/memory。
+     * <p>
+     * {@code restore-turns=0}：100 个 case 串行跑在同一台机器上，若每个 case 都恢复上一条
+     * case 的近场历史，case 之间会互相串扰（后续 case 的「用户消息」前缀里躺着别的任务的对话），
+     * 工具选择准确率就不再是可比的数字。评测要的是"每个 case 独立作答"。
+     */
+    @org.springframework.test.context.DynamicPropertySource
+    static void isolateMemory(org.springframework.test.context.DynamicPropertyRegistry registry) {
+        registry.add("yuai.memory.dir", () -> "target/eval-memory/tool-acc-" + java.util.UUID.randomUUID());
+        registry.add("yuai.memory.history.restore-turns", () -> 0);
+    }
+
+    /**
      * 业务工具集合（用于"纯聊天不应调工具"的判断，不含 doTerminate 与元工具）
      */
     private static final Set<String> BUSINESS_TOOLS = Set.of(
@@ -197,8 +211,12 @@ class ToolSelectionAccuracyTest {
      */
     private CaseRunOutcome runOneCase(int index, TestCase tc, int round) {
         CompletableFuture<CaseRunOutcome> future = CompletableFuture.supplyAsync(() -> {
+            // contextWindowManager 传 null：工具选择准确率评测关心的是"选没选对工具"，
+            // 不该被上下文压缩策略干扰（要评测压缩策略请用 ContextCompactionAbEvalTest）
+            // streamingProperties 传 null（2026-10 流式轮）：与 contextWindowManager 同理——
+            // 评测关心的只是"选没选对工具"，不引入流式这个额外变量
             YuManus yuManus = new YuManus(allTools, chatModel, memoryAssembler, memoryUpdateService,
-                    toolVectorRouter, toolRoutingProperties, conversationMemoryService);
+                    toolVectorRouter, toolRoutingProperties, conversationMemoryService, null, null);
             yuManus.setConversationId("tool-acc-" + index + "-r" + round);
             String output = yuManus.run(tc.task);
             return new CaseRunOutcome(extractCalledTools(output), output, false);

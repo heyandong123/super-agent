@@ -125,6 +125,14 @@
             <artifactId>jsonschema-generator</artifactId>
             <version>4.38.0</version>
         </dependency>
+        <!-- 精确 token 计数（BPE 分词器）：归档前截断到嵌入模型硬上限用。
+             本来由 spring-ai-commons 传递引入（TokenCountBatchingStrategy 内部就用它），
+             但本项目直接 import 了它的 API，按「用到的依赖要显式声明」的原则补上。 -->
+        <dependency>
+            <groupId>com.knuddels</groupId>
+            <artifactId>jtokkit</artifactId>
+            <version>1.1.0</version>
+        </dependency>
         <!-- 支持文件会话记忆持久化的序列化 -->
         <dependency>
             <groupId>com.esotericsoftware</groupId>

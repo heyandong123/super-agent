@@ -2,7 +2,12 @@ package com.yupi.yuaiagent.agent;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.yupi.yuaiagent.agent.model.AgentState;
+import com.yupi.yuaiagent.context.ContextWindowManager;
 import com.yupi.yuaiagent.memory.ConversationMemoryService;
+import com.yupi.yuaiagent.metrics.AgentRunMetrics;
+import com.yupi.yuaiagent.stream.StreamDisconnectedException;
+import com.yupi.yuaiagent.stream.StreamingChatAggregator;
+import com.yupi.yuaiagent.stream.StreamingProperties;
 import com.yupi.yuaiagent.toolrouter.KeywordMatcher;
 import com.yupi.yuaiagent.toolrouter.ToolRoutingProperties;
 import com.yupi.yuaiagent.toolrouter.ToolVectorRouter;
@@ -29,8 +34,10 @@ import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -53,7 +60,14 @@ import org.springframework.ai.vectorstore.VectorStore;
 @Slf4j
 public class ToolCallAgent extends ReActAgent {
 
-    private static final int MAX_CONTEXT_MESSAGES = 15;
+    /**
+     * legacy 压缩阈值：消息数<b>严格大于</b>它才压缩（见 optimizeContextWindowIfNeeded）。
+     * <p>
+     * 2026-10-11 起包级可见（去掉 private）：{@code BaseAgentMemoryRestoreTest} 用它钉死
+     * 「默认恢复 6 轮 + 记忆块 + 本轮用户消息 + nextStepPrompt = 15，恰好不触发压缩」的算术——
+     * 阈值或恢复轮数任一方被改动，那条测试必须跟着红，不能让两者悄悄失配。
+     */
+    static final int MAX_CONTEXT_MESSAGES = 15;
 
     private static final int RECENT_MESSAGES_TO_KEEP = 6;
 
@@ -94,6 +108,12 @@ public class ToolCallAgent extends ReActAgent {
     /** L2 会话缓存：本 run 内通过 searchTools 发现的工具，后续轮次直接暴露 */
     private final Set<String> sessionDiscoveredTools = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 本 run 内已出现过的「工具名 + 规范化参数」签名（阶段 1 埋点，用于重复工具调用率）。
+     * 每 run 清空（见 {@link #cleanup()}）：跨 run 保留会把上一个任务的调用误判成本次重复。
+     */
+    private final Set<String> calledToolSignatures = ConcurrentHashMap.newKeySet();
+
     /** 工具搜索元工具实例（持有引用以便 cleanup 时读取调用统计） */
     private ToolSearchTool toolSearchTool;
 
@@ -102,6 +122,28 @@ public class ToolCallAgent extends ReActAgent {
 
     /** 对话记忆向量服务（可为 null：记忆未启用时 searchMemory 工具降级为提示） */
     private final ConversationMemoryService conversationMemoryService;
+
+    /**
+     * 上下文窗口管理器（2026-10 上下文重构 · 阶段 2；可为 null —— 评测/单测里不传即退回 legacy）。
+     * 只有 {@code yuai.context.mode=budget} 时它才真正接管压缩，legacy 下旧路径一行不改。
+     */
+    private final ContextWindowManager contextWindowManager;
+
+    /**
+     * 本 run 的压缩状态（压缩次数与上次压缩步数，防 thrashing）。
+     * 放在 Agent 实例上而不是 manager 上：manager 是单例 Bean，带上跨请求状态就违反了
+     * 「每请求 new Agent、不给 Agent 加共享状态」的既有纪律。
+     */
+    private ContextWindowManager.RunState contextRunState = new ContextWindowManager.RunState();
+
+    /**
+     * 工具执行证据的环形缓冲（最近 {@value #MAX_EVIDENCE_LINES} 条，只存"工具名 + 结果前 100 字"）。
+     * 与 {@code messageList} 解耦：压缩会把工具结果换成占位文案，证据一旦继续从消息列表倒扫，
+     * 压缩之后就变成"证据是占位符"，doTerminate 的三方校验会误判任务未完成。
+     */
+    private final Deque<String> toolExecutionEvidence = new ArrayDeque<>();
+
+    private static final int MAX_EVIDENCE_LINES = 8;
 
     // ========== RAG 知识库检索(可选) ==========
     /** 向量存储,为 null 时不启用 RAG */
@@ -118,16 +160,21 @@ public class ToolCallAgent extends ReActAgent {
     public ToolCallAgent(ToolCallback[] availableTools,
                          ToolVectorRouter toolVectorRouter,
                          ToolRoutingProperties toolRoutingProperties,
-                         ConversationMemoryService conversationMemoryService) {
-        super();
+                         ConversationMemoryService conversationMemoryService,
+                         ContextWindowManager contextWindowManager,
+                         StreamingProperties streamingProperties) {
+        // 流式配置沿构造器链上抛给 BaseAgent（2026-10 流式轮），本类只在 think() 里消费它
+        super(streamingProperties);
         this.toolVectorRouter = toolVectorRouter;
         this.toolRoutingProperties = toolRoutingProperties;
         this.conversationMemoryService = conversationMemoryService;
-        // searchMemory：对话记忆检索。会话 ID 构造期还没设置（setter 在 new 之后调用），
-        // 所以用 Supplier 在调用时才读取，null 时工具降级为结构化提示。
+        // 上下文管理器沿构造器链显式传递（与 ToolVectorRouter / ToolRoutingProperties 同一条纪律：
+        // 不用 setter / @Autowired —— 那是历史 bug 的修复方向）
+        this.contextWindowManager = contextWindowManager;
+        // searchMemory：对话记忆检索。2026-10-11 单用户单会话后，检索不再需要任何键
+        // （曾经的 conversationId/userId Supplier 随"会话隔离"语义一起删除）。
         // searchMemory 是记忆能力而非"工具发现"，两种暴露模式下都常驻。
-        this.searchMemoryTool = new SearchMemoryTool(
-                conversationMemoryService, this::getConversationId);
+        this.searchMemoryTool = new SearchMemoryTool(conversationMemoryService);
         ToolCallback[] metaTools;
         if (isFullExposureMode()) {
             // 全量加载模式（默认）：不注册 searchTools/listTools 这两个"工具发现"元工具，
@@ -178,7 +225,60 @@ public class ToolCallAgent extends ReActAgent {
                     getName(), searchMemoryTool.getCallCount(), searchMemoryTool.getHitCount());
         }
         sessionDiscoveredTools.clear();
+        // 重复工具调用签名是「本 run 内」的概念，必须随 run 一起清掉
+        calledToolSignatures.clear();
+        // 证据链与压缩状态同样是 run 级状态：留下一个 run 的压缩计数会让下一个 run 一开局就不许压缩
+        toolExecutionEvidence.clear();
+        this.contextRunState = new ContextWindowManager.RunState();
         super.cleanup();
+    }
+
+    // ========== 阶段 1 埋点：全部 fail-open（metrics 为 null 时直接返回） ==========
+
+    /**
+     * 度量里的模式字段：工具暴露模式（full / dynamic）。
+     * A/B 对比与线上排查都靠它区分两种配置，缺失时回落 n/a。
+     */
+    @Override
+    protected String metricsMode() {
+        return toolRoutingProperties == null
+                ? "n/a"
+                : StrUtil.blankToDefault(toolRoutingProperties.getExposureMode(), "n/a");
+    }
+
+    /**
+     * 记录模型本步"想调用"的工具，并识别重复调用。
+     * <p>
+     * 重复判定用「工具名 + 规范化参数」（trim + 折叠空白）：模型常把同一调用换个缩进/换行重写，
+     * 不规范化会把格式差异误判成重复，重复率就失真了。
+     */
+    private void recordToolCallMetrics(List<AssistantMessage.ToolCall> toolCalls) {
+        AgentRunMetrics metrics = getRunMetrics();
+        if (metrics == null || toolCalls == null) {
+            return;
+        }
+        for (AssistantMessage.ToolCall toolCall : toolCalls) {
+            metrics.recordToolCall(toolCall.name());
+            String signature = toolCall.name() + "|"
+                    + StrUtil.blankToDefault(toolCall.arguments(), "").trim().replaceAll("\\s+", " ");
+            if (!calledToolSignatures.add(signature)) {
+                metrics.recordDuplicateToolCall();
+            }
+        }
+    }
+
+    private void recordToolRetryMetric() {
+        AgentRunMetrics metrics = getRunMetrics();
+        if (metrics != null) {
+            metrics.recordToolRetry();
+        }
+    }
+
+    private void recordSoftErrorMetric() {
+        AgentRunMetrics metrics = getRunMetrics();
+        if (metrics != null) {
+            metrics.recordSoftError();
+        }
     }
 
     /**
@@ -250,6 +350,9 @@ public class ToolCallAgent extends ReActAgent {
     }
     @Override
     public boolean think() {
+        // 预算模式的两级压缩（阶段 2）。必须发生在追加 nextStepPrompt 之前：
+        // 旧实现是"先入列再压缩"，一压缩就把刚加进去的下一步指令也摘要掉了。
+        manageContextBudgetIfEnabled();
         // 防止提示词重复污染全局记忆
         if (StrUtil.isNotBlank(getNextStepPrompt())) {
             Message lastMessage = CollUtil.getLast(getMessageList());
@@ -267,19 +370,42 @@ public class ToolCallAgent extends ReActAgent {
                 }
             }
         }
-        optimizeContextWindowIfNeeded();
+        if (!isBudgetContextMode()) {
+            // legacy（默认）：按消息条数压缩，保留为回滚目标与教学对照，一行不改
+            optimizeContextWindowIfNeeded();
+        }
         ToolCallback[] routedTools = selectToolsForCurrentStep();
         this.chatOptions.setToolCallbacks(Arrays.asList(routedTools));
         try {
             // [修复 1]: 统一使用流式构建器,确保 chatOptions 的控制权绝对不被覆写
-            ChatResponse chatResponse = getChatClient()
-                    .prompt() // 留空,不要传对象进去混合
-                    //历史对话消息
-                    .messages(getMessageList())
-                    .system(getSystemPrompt())
-                    .options(this.chatOptions) // 安全注入本轮工具与禁用自动执行的 Option
-                    .call()
-                    .chatResponse();
+            ChatResponse chatResponse;
+            if (isTextStreamingActive()) {
+                // 流式分支（2026-10 流式轮）：逐 token 消费，把增量推给客户端（scope=think）；
+                // 聚合结果与阻塞路径形状一致（含完整 toolCalls），下游 limitRedundantToolCalls / act() 一行不用改。
+                // streamUsage 只在这里开：Spring AI 会在非流式请求上剥掉 streamOptions 并打 WARN，
+                // 而 chatOptions 是实例级对象（run() 链路/子 Agent 会复用同一实例），不能常开。
+                this.chatOptions.setStreamUsage(isStreamUsageEnabled());
+                chatResponse = StreamingChatAggregator.collectBlocking(
+                        getChatClient()
+                                .prompt() // 留空,不要传对象进去混合
+                                //历史对话消息
+                                .messages(getMessageList())
+                                .system(getSystemPrompt())
+                                .options(this.chatOptions) // 安全注入本轮工具与禁用自动执行的 Option
+                                .stream()
+                                .chatResponse(),
+                        delta -> emitTextDelta("think", delta));
+            } else {
+                // 阻塞路径：yuai.stream.enabled=false 时的回滚目标；run()(评测/子 Agent) 也走这里
+                chatResponse = getChatClient()
+                        .prompt() // 留空,不要传对象进去混合
+                        //历史对话消息
+                        .messages(getMessageList())
+                        .system(getSystemPrompt())
+                        .options(this.chatOptions) // 安全注入本轮工具与禁用自动执行的 Option
+                        .call()
+                        .chatResponse();
+            }
             chatResponse = limitRedundantToolCalls(chatResponse);
             // 将大模型的回复存入全局变量,留给稍后的 act() 方法使用
             this.toolCallChatResponse = chatResponse;
@@ -299,6 +425,9 @@ public class ToolCallAgent extends ReActAgent {
                         .map(toolCall -> String.format("工具名称:%s,参数:%s", toolCall.name(), toolCall.arguments()))
                         .collect(Collectors.joining("\n"));
                 log.info(toolCallInfo);
+                // 阶段 1 埋点：记录模型"想调用"的工具（不是实际执行的，执行在 act()）。
+                // 微压缩的已知副作用就是模型会重新调用刚被清掉的工具，重复率是它的量化口径。
+                recordToolCallMetrics(toolCallList);
                 // 需要调用工具时,无需记录助手消息,返回 true 进入 act 阶段
                 return true;
             } else {
@@ -306,6 +435,10 @@ public class ToolCallAgent extends ReActAgent {
                 getMessageList().add(assistantMessage);
                 return false;
             }
+        } catch (StreamDisconnectedException e) {
+            // 客户端已断（SSE 增量发送失败，2026-10 流式轮）：原样上抛给 runStream 的收尾逻辑。
+            // 不能像普通异常那样吞掉——状态已被置 ERROR 但异常被吞的话，循环会继续尝试后续步骤继续烧 token
+            throw e;
         } catch (Exception e) {
             // 打印完整的异常堆栈,方便排错
             log.error(getName() + "的思考过程遇到了问题:" + e.getMessage(), e);
@@ -329,6 +462,8 @@ public class ToolCallAgent extends ReActAgent {
         for (int retry = 0; retry <= MAX_RETRY_COUNT; retry++) {
             if (retry > 0) {
                 log.warn("{} 工具调用失败,第 {} 次重试,工具:{}", getName(), retry, toolNames);
+                // 阶段 1 埋点：retry>0 即一次重试尝试（软错误 / 超时 / 异常三条路径都汇到这里）
+                recordToolRetryMetric();
             }
             try {
                 // 确保 chatOptions 包含本轮所有需要的工具(路由可能误过滤)
@@ -348,9 +483,15 @@ public class ToolCallAgent extends ReActAgent {
                 recordStepTools(toolResponseMessage.getResponses().stream()
                         .map(ToolResponseMessage.ToolResponse::name)
                         .toArray(String[]::new));
+                // 证据要在"结果还是原文"的此刻入缓冲：晚一步就可能被压缩换成占位文案
+                recordToolExecutionEvidence(toolResponseMessage);
 
                 boolean hasSoftError = toolResponseMessage.getResponses().stream()
                         .anyMatch(r -> String.valueOf(r.responseData()).startsWith("Error"));
+                if (hasSoftError) {
+                    // 阶段 1 埋点：软错误 = 工具没抛异常但明确返回了失败（"Error..." 开头）
+                    recordSoftErrorMetric();
+                }
                 if (hasSoftError && retry < MAX_RETRY_COUNT) {
                     continue;
                 }
@@ -428,11 +569,9 @@ public class ToolCallAgent extends ReActAgent {
             return "未提供任务完成清单";
         }
         try {
-            String originalTask = getMessageList().stream()
-                    .filter(message -> message instanceof UserMessage)
-                    .map(Message::getText)
-                    .findFirst()
-                    .orElse("");
+            // 原始任务读 BaseAgent.currentUserPrompt，不再扫消息列表第一条 UserMessage——
+            // 单会话恢复注入后，历史轮次的 UserMessage 排在真正任务之前，扫出来会是旧任务
+            String originalTask = StrUtil.blankToDefault(getCurrentUserPrompt(), "");
             String evidence = buildToolExecutionEvidence();
             ChatResponse verifyResponse = getChatClient()
                     .prompt()
@@ -465,30 +604,17 @@ public class ToolCallAgent extends ReActAgent {
     }
 
     /**
-     * 构建工具执行证据摘要：从消息历史提取最近 8 条工具执行记录，
-     * 每条截断为"工具名: 结果前 100 字"（doTerminate 自身的输出即清单，不作为证据）。
+     * 构建工具执行证据摘要：直接读环形缓冲（最近 {@value #MAX_EVIDENCE_LINES} 条）。
+     * <p>
+     * 旧实现是从 {@code getMessageList()} 倒扫 ToolResponseMessage 拼的——上下文压缩会把工具结果
+     * 替换成占位文案，于是"证据"退化成占位符，三方校验会误判任务没完成。
+     * 改成读缓冲后，证据与压缩彻底解耦（顺带：微压缩也就不会再有"删了证据"的副作用）。
      */
-    private String buildToolExecutionEvidence() {
-        List<String> evidenceLines = new ArrayList<>();
-        List<Message> messages = getMessageList();
-        int count = 0;
-        for (int i = messages.size() - 1; i >= 0 && count < 8; i--) {
-            Message message = messages.get(i);
-            if (!(message instanceof ToolResponseMessage toolResponse)) {
-                continue;
-            }
-            for (ToolResponseMessage.ToolResponse response : toolResponse.getResponses()) {
-                if ("doTerminate".equals(response.name())) {
-                    continue;
-                }
-                String data = String.valueOf(response.responseData());
-                String compact = data.replace("\n", " ").trim();
-                String truncated = compact.length() > 100 ? compact.substring(0, 100) + "..." : compact;
-                evidenceLines.add(0, "- " + response.name() + ": " + (truncated.isEmpty() ? "（无输出）" : truncated));
-                count++;
-            }
+    String buildToolExecutionEvidence() {
+        if (toolExecutionEvidence.isEmpty()) {
+            return "（无工具执行记录）";
         }
-        return evidenceLines.isEmpty() ? "（无工具执行记录）" : String.join("\n", evidenceLines);
+        return String.join("\n", toolExecutionEvidence);
     }
 
     private boolean isSearchAgentToolFailure(ToolResponseMessage toolResponseMessage) {
@@ -562,6 +688,84 @@ public class ToolCallAgent extends ReActAgent {
         );
     }
 
+    // ========== 上下文预算模式（2026-10 上下文重构 · 阶段 2） ==========
+
+    /** 是否由 {@link ContextWindowManager} 接管上下文管理（默认 false，走 legacy） */
+    private boolean isBudgetContextMode() {
+        return contextWindowManager != null && contextWindowManager.isBudgetMode();
+    }
+
+    /**
+     * 按 token 预算管理上下文：一级微压缩（清旧工具结果，零 LLM 成本）→ 二级整体压缩（LLM 摘要，先落盘）。
+     * 全部 fail-open：上下文管理失败最多是"这轮没压"，绝不能让整轮任务挂掉。
+     */
+    private void manageContextBudgetIfEnabled() {
+        if (!isBudgetContextMode()) {
+            return;
+        }
+        try {
+            ContextWindowManager.Result result = contextWindowManager.manage(getMessageList(),
+                    new ContextWindowManager.ManageRequest(
+                            this::summarizeHistory,
+                            getName(),
+                            getCurrentUserPrompt(),
+                            getConversationId(),
+                            getCurrentStep(),
+                            contextRunState,
+                            getRunMetrics()));
+            if (result.microcompacted() || result.compacted()) {
+                setMessageList(result.messages());
+            }
+        } catch (Exception e) {
+            log.warn("{} 上下文预算管理失败，本轮按原样继续: {}", getName(), e.getMessage());
+        }
+    }
+
+    /**
+     * 摘要器实现：与主对话<b>同一个系统提示</b>（对标 Claude Code 的"同系统提示 + 同历史 + 末尾指令"），
+     * 而不是旧实现那套另写的压缩提示——换系统提示等于换人格，摘要出来的东西和主对话关心的不是一回事。
+     * 渲染由 manager 负责（按消息类型分支、取 ToolResponseMessage 的 responses），这里只管调模型。
+     */
+    private String summarizeHistory(String historyText) {
+        ChatResponse response = getChatClient()
+                .prompt()
+                .system(StrUtil.blankToDefault(getSystemPrompt(), ""))
+                .user(historyText + """
+
+                        ---
+                        Compress the conversation history above into a compact working memory that you will
+                        keep using to finish the task. Preserve, in this order:
+                        1) the user's original goal and every explicit constraint;
+                        2) completed tool actions with their key results (keep file paths verbatim);
+                        3) unfinished sub-tasks;
+                        4) important numbers, names and conclusions.
+                        Drop small talk. Do not restate these instructions. Reply with the memory only.
+                        """)
+                .call()
+                .chatResponse();
+        return response.getResult().getOutput().getText();
+    }
+
+    /**
+     * 记录工具执行证据（环形缓冲，最近 {@value #MAX_EVIDENCE_LINES} 条）。
+     * 在 act() 里、工具刚执行完时写入——那时结果还是原文，不受任何后续压缩影响。
+     */
+    // 包级可见：离线单测直接喂消息进缓冲、断言证据不受压缩影响（见 ToolCallAgentEvidenceTest）
+    void recordToolExecutionEvidence(ToolResponseMessage toolResponseMessage) {
+        for (ToolResponseMessage.ToolResponse response : toolResponseMessage.getResponses()) {
+            if ("doTerminate".equals(response.name())) {
+                continue;
+            }
+            String compact = String.valueOf(response.responseData()).replace("\n", " ").trim();
+            String truncated = compact.length() > 100 ? compact.substring(0, 100) + "..." : compact;
+            toolExecutionEvidence.addLast(
+                    "- " + response.name() + ": " + (truncated.isEmpty() ? "（无输出）" : truncated));
+            while (toolExecutionEvidence.size() > MAX_EVIDENCE_LINES) {
+                toolExecutionEvidence.removeFirst();
+            }
+        }
+    }
+
     private void optimizeContextWindowIfNeeded() {
         List<Message> currentMessages = getMessageList();
         if (currentMessages.size() <= MAX_CONTEXT_MESSAGES) {
@@ -575,13 +779,27 @@ public class ToolCallAgent extends ReActAgent {
         optimizedMessages.add(new SystemMessage(SUMMARY_PREFIX + summary));
         optimizedMessages.addAll(recentMessages);
         setMessageList(optimizedMessages);
+        // 埋点：legacy 路径也记账（2026-10 上下文重构 · 阶段 4）。不记账的话
+        // 「budget 模式压缩次数更少」就成了无法证伪的说法——A/B 要把两种模式放在同一张表里比。
+        // fallback 恒传 false：本方法没有"摘要失败"分支（summarizeMessages 内部已 try/catch 回落成截断文本）。
+        AgentRunMetrics legacyMetrics = getRunMetrics();
+        if (legacyMetrics != null) {
+            legacyMetrics.recordCompaction(false);
+        }
         log.info("{} 上下文压缩完成,原消息数:{},压缩后消息数:{}", getName(), currentMessages.size(), optimizedMessages.size());
     }
 
     private String summarizeMessages(List<Message> messages) {
-        String historyText = messages.stream()
-                .map(message -> message.getMessageType() + ": " + message.getText())
-                .collect(Collectors.joining("\n"));
+        // 渲染与 budget 路径共用同一实现（2026-10 重构轮补修 P3）。旧实现是
+        // `message.getMessageType() + ": " + message.getText()`，而 ToolResponseMessage 的 text 是
+        // 空串常量（spring-ai 字节码实锤）——摘要器眼里的工具输出**全是空的**，既丢信息又白花一次 LLM。
+        // 这个 bug 两条路径共有，所以修复也必须两条路径共有：只修 budget 等于把已知缺陷留在默认路径上，
+        // 而且会让 A/B 里的差异不止"触发策略"一个变量（budget 会因渲染更好而占便宜）。
+        String historyText = contextWindowManager != null
+                ? contextWindowManager.renderForSummary(messages)
+                : messages.stream()
+                        .map(message -> message.getMessageType() + ": " + message.getText())
+                        .collect(Collectors.joining("\n"));
         try {
             ChatResponse summaryResponse = getChatClient()
                     .prompt()
@@ -605,8 +823,9 @@ public class ToolCallAgent extends ReActAgent {
         } catch (Exception e) {
             log.warn("{} 生成上下文摘要失败,改用截断摘要:{}", getName(), e.getMessage());
         }
+        // 失败回落保留**最近**的内容（P5）：旧实现截最老的 1200 字符，恰好丢掉模型最需要的"我刚才在干什么"
         int fallbackLength = Math.min(historyText.length(), 1200);
-        return historyText.substring(0, fallbackLength);
+        return historyText.substring(historyText.length() - fallbackLength);
     }
 
     /**

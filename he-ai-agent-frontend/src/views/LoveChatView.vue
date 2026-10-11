@@ -2,7 +2,7 @@
 import ChatPage from "../components/ChatPage.vue";
 import { getLoveChatSse } from "../services/chatApi";
 
-function streamRequest(message, chatId, _userId, onMessage, onError, onDone) {
+function streamRequest(message, chatId, onMessage, onError, onDone) {
   return getLoveChatSse(message, chatId, onMessage, onError, onDone);
 }
 </script>

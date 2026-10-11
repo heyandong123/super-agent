@@ -37,7 +37,7 @@ class BaseAgentLifecycleTest {
         MemoryUpdateService failingMemory = mock(MemoryUpdateService.class);
         doThrow(new RuntimeException("模拟磁盘写满"))
                 .when(failingMemory)
-                .recordAgentInteraction(anyString(), anyString(), anyString(), anyString(), anyString());
+                .recordAgentInteraction(anyString(), anyString(), anyString());
 
         StubAgent agent = new StubAgent(2);
         agent.setMemoryUpdateService(failingMemory);
@@ -104,13 +104,20 @@ class BaseAgentLifecycleTest {
      * 用记忆写入作为「worker 已收尾」的信号：finally 里的顺序是 cleanup() → recordMemorySafely()，
      * 所以闩锁一放行，状态机就已经落定，断言不存在竞态。
      * （不能直接轮询 state == IDLE：初始状态本来就是 IDLE，会假阳性通过。）
+     * <p>
+     * 注意打桩的是 {@code recordAgentInteraction(name, prompt, output)}
+     * （2026-10-11 单用户单会话重构后从 6 参收敛为 3 参：键参数全部删除，
+     * {@code writeProfile} 开关上移到 BaseAgent.recordMemoryAfterRun——关掉记忆的 Agent
+     * 压根不会调到这里）。
+     * 签名对不上时打桩会静默失效——Mockito 对未打桩的方法不做任何事，
+     * 闩锁永不放行，测试超时失败而不是假通过。
      */
     private static void attachFinishLatch(StubAgent agent) {
         MemoryUpdateService memory = mock(MemoryUpdateService.class);
         doAnswer(invocation -> {
             agent.markWorkerFinished();
             return null;
-        }).when(memory).recordAgentInteraction(anyString(), anyString(), anyString(), anyString(), anyString());
+        }).when(memory).recordAgentInteraction(anyString(), anyString(), anyString());
         agent.setMemoryUpdateService(memory);
     }
 
@@ -127,6 +134,8 @@ class BaseAgentLifecycleTest {
         private volatile AgentState stateAfterFirstStep;
 
         private StubAgent(int maxSteps) {
+            // 2026-10 流式轮：显式传 null = 不启用流式（本测试只关心状态机，钉在阻塞语义上）
+            super(null);
             setName("stub-agent");
             setMaxSteps(maxSteps);
         }

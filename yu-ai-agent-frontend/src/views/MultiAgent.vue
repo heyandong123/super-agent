@@ -51,9 +51,10 @@ const messages = ref([])
 const connectionStatus = ref('disconnected')
 let eventSource = null
 
-// 会话持久化：服务端生成的 conversationId + userId 存 sessionStorage。
-// 用 sessionStorage 而非 localStorage：每个标签页独立会话（开两个页面记忆不混淆），
-// 刷新页面会话保留（多轮记忆不丢），关闭标签页则下次开启新会话。
+// 会话持久化：服务端生成的 conversationId 存 sessionStorage。
+// 用 sessionStorage 而非 localStorage：每个标签页独立会话，刷新页面会话保留（多轮记忆不丢），
+// 关闭标签页则下次开启新会话。
+// 单用户单会话重构后不再存 userId：记忆（画像/摘要/历史）全局唯一一份，换会话也接得上。
 const SESSION_STORAGE_KEY = 'yu_ai_agent_multi_session'
 const loadSession = () => {
   try {
@@ -65,14 +66,12 @@ const loadSession = () => {
 }
 const saveSession = () => {
   sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-    chatId: chatId.value,
-    userId: userId.value
+    chatId: chatId.value
   }))
 }
 const savedSession = loadSession()
 // chatId 为空 = 首次会话，请求不带 chatId，由服务端生成 UUID 并通过 session 事件回传
 const chatId = ref(savedSession?.chatId || '')
-const userId = ref(savedSession?.userId || '')
 
 // 添加消息到列表
 const addMessage = (content, isUser, type = '') => {
@@ -126,16 +125,32 @@ const sendMessage = (message) => {
     messageBuffer = []
   }
   
-  eventSource = chatWithMultiAgentManus(message, chatId.value, userId.value, {
+  // 最终答案的流式气泡下标（2026-10 流式轮）：-1 = 还没有流式气泡
+  let finalMessageIndex = -1
+
+  eventSource = chatWithMultiAgentManus(message, chatId.value, {
     onSession: (data) => {
       // 服务端确认会话：首次请求服务端生成 conversationId，之后请求携带复用
       if (data.conversationId) chatId.value = data.conversationId
-      if (data.userId) userId.value = data.userId
       saveSession()
     },
+    onDelta: (data) => {
+      // 只接最终答案的增量：协调器的中间过程（规划/子任务）本来就走 process 面板，
+      // 这个页面刻意不渲染 think 叙述，避免与执行轨迹重复
+      if (!data || !data.text || data.scope !== 'final') return
+      if (finalMessageIndex < 0) {
+        addMessage('', false, 'ai-final')
+        finalMessageIndex = messages.value.length - 1
+      }
+      messages.value[finalMessageIndex].content += data.text
+    },
     onFinal: (data) => {
-      // 后端 BaseAgent 发送命名事件 final（完整回复），不再依赖裸文本流
-      createBubble(data.content, 'ai-final')
+      // 终态权威：流式渲染过就整条覆盖，没流过（流式关闭/合成失败走兜底文本）就直落一整条
+      if (finalMessageIndex >= 0) {
+        messages.value[finalMessageIndex].content = data.content
+      } else {
+        createBubble(data.content, 'ai-final')
+      }
       connectionStatus.value = 'disconnected'
       eventSource.close()
     }
